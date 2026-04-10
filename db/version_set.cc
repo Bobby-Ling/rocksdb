@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "db/blob/blob_fetcher.h"
@@ -1576,7 +1577,7 @@ void Version::GetColumnFamilyMetaData(ColumnFamilyMetaData* cf_meta) {
           file->being_compacted, file->temperature,
           file->oldest_blob_file_number, file->TryGetOldestAncesterTime(),
           file->TryGetFileCreationTime(), file->file_checksum,
-          file->file_checksum_func_name);
+          file->file_checksum_func_name, file->partition_id);
       files.back().num_entries = file->num_entries;
       files.back().num_deletions = file->num_deletions;
       level_size += file->fd.GetFileSize();
@@ -1741,8 +1742,35 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
   auto* arena = merge_iter_builder->GetArena();
   if (level == 0) {
     // Merge all level zero files together since they may overlap
+    std::unordered_set<PartitionID> allowed_pids;
+    bool enable_partition_filter = false;
+
+    if (storage_info_.compaction_style_ == CompactionStyle::kCompactionStyleDelta) {
+      // in delta
+      const auto pt = storage_info_.GetPartitionTable();
+      assert(pt != nullptr);
+      assert(pt->IsInitialized());
+
+      const std::optional<std::string> left =
+          read_options.iterate_lower_bound
+              ? std::optional<std::string>(read_options.iterate_lower_bound->ToString())
+              : std::nullopt;
+      const std::optional<std::string> right =
+          read_options.iterate_upper_bound
+              ? std::optional<std::string>(read_options.iterate_upper_bound->ToString())
+              : std::nullopt;
+
+      std::vector<PartitionID> pids = pt->FindPartitionInRange(left, right);
+      allowed_pids.insert(pids.begin(), pids.end());
+      enable_partition_filter = true;
+    }
+
     for (size_t i = 0; i < storage_info_.LevelFilesBrief(0).num_files; i++) {
       const auto& file = storage_info_.LevelFilesBrief(0).files[i];
+      if (enable_partition_filter &&
+          allowed_pids.find(file.file_metadata->partition_id) == allowed_pids.end()) {
+        continue;
+      }
       merge_iter_builder->AddIterator(cfd_->table_cache()->NewIterator(
           read_options, soptions, cfd_->internal_comparator(),
           *file.file_metadata, range_del_agg,
@@ -1759,6 +1787,10 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
       // If users execute one range query per iterator, there may be some
       // discrepancy here.
       for (FileMetaData* meta : storage_info_.LevelFiles(0)) {
+        if (enable_partition_filter &&
+            allowed_pids.find(meta->partition_id) == allowed_pids.end()) {
+          continue;
+        }
         sample_file_read_inc(meta);
       }
     }
@@ -1884,6 +1916,7 @@ VersionStorageInfo::VersionStorageInfo(
     oldest_snapshot_seqnum_ = ref_vstorage->oldest_snapshot_seqnum_;
     compact_cursor_ = ref_vstorage->compact_cursor_;
     compact_cursor_.resize(num_levels_);
+    partition_table_ = ref_vstorage->partition_table_;
   }
 }
 
@@ -1920,7 +1953,16 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
       max_file_size_for_l0_meta_pin_(
           MaxFileSizeForL0MetaPin(mutable_cf_options_)),
       version_number_(version_number),
-      io_tracer_(io_tracer) {}
+      io_tracer_(io_tracer) {
+  if (storage_info_.GetPartitionTable() == nullptr) {
+    const auto delta_options = mutable_cf_options.compaction_options_delta;
+    const auto max_partitions = delta_options.max_partitions;
+    const auto split_threshold = delta_options.partition_split_growth_threshold;
+    const auto merge_threshold = delta_options.partition_merge_growth_threshold;
+    storage_info_.SetPartitionTable(std::make_shared<PartitionTable>(
+        max_partitions, split_threshold, merge_threshold));
+  }
+}
 
 Status Version::GetBlob(const ReadOptions& read_options, const Slice& user_key,
                         const Slice& blob_index_slice,
@@ -3004,7 +3046,14 @@ void VersionStorageInfo::ComputeCompactionScore(
         }
       }
 
-      if (compaction_style_ == kCompactionStyleFIFO) {
+      if (compaction_style_ == kCompactionStyleDelta) {
+        // Compute score based on partition growth-rate thresholds.
+        // score >= 1 means split or merge is needed.
+        score = 0.0;
+        if (partition_table_ && partition_table_->IsInitialized()) {
+          score = partition_table_->ComputeCompactionScore();
+        }
+      } else if (compaction_style_ == kCompactionStyleFIFO) {
         score = static_cast<double>(total_size) /
                 mutable_cf_options.compaction_options_fifo.max_table_files_size;
         if (mutable_cf_options.compaction_options_fifo.allow_compaction ||
@@ -3393,6 +3442,96 @@ VersionStorageInfo::GetBlobFileMetaDataLB(uint64_t blob_file_number) const {
         assert(lhs);
         return lhs->GetBlobFileNumber() < rhs;
       });
+}
+
+std::vector<FileMetaData*> VersionStorageInfo::GetFilesInPartition(
+    PartitionID pid) const {
+  std::vector<FileMetaData*> result;
+  for (FileMetaData* f : files_[0]) {
+    if (f->partition_id == pid) {
+      result.push_back(f);
+    }
+  }
+  return result;
+}
+
+std::string VersionStorageInfo::DeltaDebugString() const {
+  std::string out;
+  out.reserve(1024);
+
+  if (!partition_table_) {
+    out.append("  partition_table=null\n");
+    return out;
+  }
+
+  const auto partition_infos = partition_table_->GetPartitionInfos();
+  if (partition_infos.empty()) {
+    out.append("  partition_table=empty\n");
+    return out;
+  }
+
+  const auto compaction_score = partition_table_->ComputeCompactionScore();
+
+  out.append("delta_sst_partition_view:");
+  out.append(" num_l0_files=");
+  out.append(std::to_string(files_[0].size()));
+  out.append(" compaction_score=");
+  out.append(std::to_string(compaction_score));
+  out.push_back('\n');
+
+  for (const auto& partition_info : partition_infos) {
+    const PartitionID pid = partition_info.partition_id;
+    const auto files = GetFilesInPartition(pid);
+    out.append("  partition pid=");
+    out.append(std::to_string(pid));
+    out.append(" growth=");
+    out.append(std::to_string(partition_info.growth_rate));
+    out.append(" left=[");
+    if (partition_info.left_bound.has_value()) {
+      out.append(Slice(partition_info.left_bound.value()).ToString(true));
+    } else {
+      out.append("-INF");
+    }
+    out.append("] right=[");
+    if (partition_info.right_bound.has_value()) {
+      out.append(Slice(partition_info.right_bound.value()).ToString(true));
+    } else {
+      out.append("+INF");
+    }
+    out.append("]");
+    out.append(" files=");
+    out.append(std::to_string(files.size()));
+    out.push_back('\n');
+
+    for (const auto* f : files) {
+      out.append("    sst=");
+      out.append(std::to_string(f->fd.GetNumber()));
+      out.append(" pid=");
+      out.append(std::to_string(f->partition_id));
+      out.append(" seq=[");
+      out.append(std::to_string(f->fd.smallest_seqno));
+      out.push_back(',');
+      out.append(std::to_string(f->fd.largest_seqno));
+      out.append("]");
+
+      out.append(" entries=");
+      out.append(std::to_string(f->num_entries));
+      out.append(" dels=");
+      out.append(std::to_string(f->num_deletions));
+      out.append(" size=");
+      out.append(std::to_string(f->fd.GetFileSize()));
+      out.append(" compacted=");
+      out.append(" key=[");
+      out.append(f->smallest.DebugString(true));
+      out.append(" .. ");
+      out.append(f->largest.DebugString(true));
+      out.append("]");
+      out.append(f->being_compacted ? "1" : "0");
+      out.push_back('\n');
+    }
+  }
+
+  return out;
 }
 
 void VersionStorageInfo::SetFinalized() {
@@ -4697,6 +4836,25 @@ Status VersionSet::ProcessManifestWrites(
           delete v;
         }
         return s;
+      }
+      uint32_t cf_id = versions[i]->cfd_->GetID();
+      for (const auto& e : batch_edits) {
+        if (e->column_family_ != cf_id) {
+          continue;
+        }
+        if (e->GetPartitionTableEdits()) {
+          ColumnFamilyData* cfd = column_family_set_->GetColumnFamily(cf_id);
+          Version* current_version = cfd->current();
+          VersionStorageInfo* vstorage_info = current_version->storage_info();
+          ROCKS_LOG_INFO(db_options_->info_log, "%s", vstorage_info->DeltaDebugString().c_str());
+          assert(cfd != nullptr);
+          versions[i]->storage_info()->SetPartitionTable(
+              current_version->storage_info()
+                  ->GetPartitionTable()
+                  ->ApplyToNewTable(*e->GetPartitionTableEdits()));
+          // TODO(lcr) batch_edits下的PartitionTable更新???
+          break;
+        }
       }
     }
   }

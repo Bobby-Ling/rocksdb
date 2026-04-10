@@ -9,6 +9,7 @@
 
 #pragma once
 #include <algorithm>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -17,6 +18,7 @@
 #include "db/blob/blob_file_addition.h"
 #include "db/blob/blob_file_garbage.h"
 #include "db/dbformat.h"
+#include "db/partition_table.h"
 #include "db/wal_edit.h"
 #include "memory/arena.h"
 #include "port/malloc.h"
@@ -219,6 +221,9 @@ struct FileMetaData {
 
   // SST unique id
   UniqueId64x2 unique_id{};
+
+  // 分区ID
+  PartitionID partition_id = kInvalidPartitionID;
 
   FileMetaData() = default;
 
@@ -669,6 +674,15 @@ class VersionEdit {
   uint32_t remaining_entries_ = 0;
 
   std::string full_history_ts_low_;
+
+  std::shared_ptr<PartitionTableEdits> partition_table_edits = std::make_shared<PartitionTableEdits>();
+ public:
+  PartitionTableEdits* GetPartitionTableEdits() const {
+    return partition_table_edits.get();
+  }
+  // void SetPartitionTableEdits(const std::shared_ptr<PartitionTable> pt) {
+  //   partition_table_editor_ = std::make_shared<PartitionTableEdits>(pt.get());
+  // }
 };
 
 }  // namespace ROCKSDB_NAMESPACE

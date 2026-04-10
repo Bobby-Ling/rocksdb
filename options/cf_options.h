@@ -135,6 +135,7 @@ struct MutableCFOptions {
         max_bytes_for_level_multiplier_additional(
             options.max_bytes_for_level_multiplier_additional),
         compaction_options_fifo(options.compaction_options_fifo),
+        compaction_options_delta(options.compaction_options_delta),
         compaction_options_universal(options.compaction_options_universal),
         enable_blob_files(options.enable_blob_files),
         min_blob_size(options.min_blob_size),
@@ -195,6 +196,7 @@ struct MutableCFOptions {
         ttl(0),
         periodic_compaction_seconds(0),
         compaction_options_fifo(),
+        compaction_options_delta(),
         enable_blob_files(false),
         min_blob_size(0),
         blob_file_size(0),
@@ -277,6 +279,7 @@ struct MutableCFOptions {
   uint64_t periodic_compaction_seconds;
   std::vector<int> max_bytes_for_level_multiplier_additional;
   CompactionOptionsFIFO compaction_options_fifo;
+  CompactionOptionsDelta compaction_options_delta;
   CompactionOptionsUniversal compaction_options_universal;
 
   // Blob file related options

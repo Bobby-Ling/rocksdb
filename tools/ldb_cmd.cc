@@ -3882,7 +3882,15 @@ void DBLiveFilesMetadataDumperCommand::DoCommand() {
           // drop a possible extra "/" at the end of SstFileMetaData.db_path.
           std::string filename =
               NormalizePath(sst_metadata.db_path + "/" + sst_metadata.name);
-          std::cout << filename << std::endl;
+          std::cout << filename
+                    << "  num=" << sst_metadata.file_number
+                    << "  size=" << sst_metadata.size
+                    << "  seqno=[" << sst_metadata.smallest_seqno
+                    << "," << sst_metadata.largest_seqno << "]"
+                    << "  smallest='" << sst_metadata.smallestkey << "'"
+                    << "  largest='" << sst_metadata.largestkey << "'"
+                    << "  partition_id=" << sst_metadata.partition_id
+                    << std::endl;
         }  // End of for-loop over sst files
       }    // End of for-loop over levels
 

@@ -557,6 +557,22 @@ DEFINE_bool(universal_allow_trivial_move, false,
 DEFINE_bool(universal_incremental, false,
             "Enable incremental compactions in universal compaction.");
 
+// Delta compaction style options
+DEFINE_uint32(delta_max_partitions, 16,
+              "Delta compaction: Maximum number of key-range partitions.");
+
+DEFINE_double(delta_partition_split_growth_threshold, 1.5,
+              "Delta compaction: Split partition when growth_rate exceeds "
+              "average * this multiplier.");
+
+DEFINE_double(delta_partition_merge_growth_threshold, 0.5,
+              "Delta compaction: Merge partition when growth_rate falls below "
+              "average * this multiplier.");
+
+DEFINE_uint64(delta_partition_target_file_size, 64 * 1048576,
+              "Delta compaction: Target bytes per SST file within a partition "
+              "(0 = no limit).");
+
 DEFINE_int64(cache_size, 8 << 20,  // 8MB
              "Number of bytes to use as a cache of uncompressed data");
 
@@ -4163,6 +4179,19 @@ class Benchmark {
         FLAGS_fifo_compaction_max_table_files_size_mb * 1024 * 1024,
         FLAGS_fifo_compaction_allow_compaction);
     options.compaction_options_fifo.age_for_warm = FLAGS_fifo_age_for_warm;
+    // Delta compaction options
+    if (FLAGS_compaction_style_e == kCompactionStyleDelta) {
+      options.compaction_options_delta.max_partitions =
+          FLAGS_delta_max_partitions;
+      options.compaction_options_delta.partition_split_growth_threshold =
+          FLAGS_delta_partition_split_growth_threshold;
+      options.compaction_options_delta.partition_merge_growth_threshold =
+          FLAGS_delta_partition_merge_growth_threshold;
+      options.compaction_options_delta.partition_target_file_size =
+          FLAGS_delta_partition_target_file_size;
+      // Delta style requires num_levels=1 (L0 only)
+      options.num_levels = 1;
+    }
 #endif  // ROCKSDB_LITE
     options.prefix_extractor = prefix_extractor_;
     if (FLAGS_use_uint64_comparator) {

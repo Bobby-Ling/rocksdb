@@ -79,6 +79,10 @@ const char* GetCompactionReasonString(CompactionReason compaction_reason) {
       return "FIFOReduceNumFiles";
     case CompactionReason::kFIFOTtl:
       return "FIFOTtl";
+    case CompactionReason::kDeltaMerge:
+      return "DeltaMerge";
+    case CompactionReason::kDeltaSplit:
+      return "DeltaSplit";
     case CompactionReason::kManualCompaction:
       return "ManualCompaction";
     case CompactionReason::kFilesMarkedForCompaction:
@@ -1621,6 +1625,24 @@ Status CompactionJob::InstallCompactionResults(
   VersionEdit* const edit = compaction->edit();
   assert(edit);
 
+  if (const auto& plan = compaction->GetCompactionPlan()) {
+    const auto* base_vstorage = compaction->input_version()->storage_info();
+    const auto& delta_opts =
+        compaction->mutable_cf_options()->compaction_options_delta;
+    auto* pt_editor = edit->GetPartitionTableEdits();
+    assert(pt_editor != nullptr);
+
+    if (plan->type == PartitionTable::Plan::Type::kMerge) {
+      auto merge_plan = std::static_pointer_cast<PartitionTable::MergePlan>(plan);
+      pt_editor->AddMerge(*merge_plan);
+    } else if (plan->type == PartitionTable::Plan::Type::kSplit) {
+      auto split_plan = std::static_pointer_cast<PartitionTable::SplitPlan>(plan);
+      if (!boundaries_.empty()) {
+        pt_editor->AddSplit(*split_plan, boundaries_.front());
+      }
+    }
+  }
+
   // Add compaction inputs
   compaction->AddInputDeletions(edit);
 
@@ -1800,6 +1822,24 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
                       cfd->GetName().c_str(), job_id_, meta.fd.GetNumber(),
                       s.ToString().c_str());
       return s;
+    }
+
+    if (const auto& plan = sub_compact->compaction->GetCompactionPlan()) {
+      if (plan->type == PartitionTable::Plan::Type::kMerge) {
+        auto merge_plan = std::static_pointer_cast<PartitionTable::MergePlan>(plan);
+        meta.partition_id = merge_plan->right_pid;
+      } else if (plan->type == PartitionTable::Plan::Type::kSplit) {
+        auto split_plan = std::static_pointer_cast<PartitionTable::SplitPlan>(plan);
+        meta.partition_id = split_plan->pid;
+        if (!boundaries_.empty() && sub_compact->start.has_value()) {
+          const auto* ucmp =
+              sub_compact->compaction->column_family_data()->user_comparator();
+          if (ucmp->Compare(sub_compact->start.value(), boundaries_.front()) >=
+              0) {
+            meta.partition_id = split_plan->new_pid;
+          }
+        }
+      }
     }
 
     outputs.AddOutput(std::move(meta), cfd->internal_comparator(),

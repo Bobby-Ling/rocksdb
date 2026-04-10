@@ -36,6 +36,9 @@ enum CompactionStyle : char {
   // via CompactFiles().
   // Not supported in ROCKSDB_LITE
   kCompactionStyleNone = 0x3,
+  // Delta compaction style:
+  // 1. 仅有L0; 2. L0动态分区; 3. 分区内是Tierd; 4. 为行存表(读写混合负载优化)
+  kCompactionStyleDelta = 0x4,
 };
 
 // In Level-based compaction, it Determines which file from a level to be
@@ -249,6 +252,26 @@ enum UpdateStatus {    // Return status For inplace update callback
 enum class PrepopulateBlobCache : uint8_t {
   kDisable = 0x0,    // Disable prepopulate blob cache
   kFlushOnly = 0x1,  // Prepopulate blobs during flush only
+};
+
+// Options for kCompactionStyleDelta.
+struct CompactionOptionsDelta {
+  // Maximum number of key-range partitions. Initial flush creates max_partitions/2
+  // partitions. Partitions split/merge based on growth_rate thresholds.
+  // Default: 16
+  uint32_t max_partitions = 16;
+
+  // Split a partition when its growth_rate exceeds average * this multiplier.
+  // Default: 1.5
+  double partition_split_growth_threshold = 1.5;
+
+  // Merge a partition when its growth_rate falls below average * this multiplier.
+  // Default: 0.5
+  double partition_merge_growth_threshold = 0.5;
+
+  // Target number of bytes per SST file within a partition (0 = no limit).
+  // Default: 64MB
+  uint64_t partition_target_file_size = 64 * 1048576;
 };
 
 struct AdvancedColumnFamilyOptions {
@@ -709,6 +732,9 @@ struct AdvancedColumnFamilyOptions {
   // Dynamic change example:
   // SetOptions("compaction_options_fifo", "{max_table_files_size=100;}")
   CompactionOptionsFIFO compaction_options_fifo;
+
+  // The options for Delta compaction style
+  CompactionOptionsDelta compaction_options_delta;
 
   // An iteration->Next() sequentially skips over keys with the same
   // user-key unless this option is set. This number specifies the number

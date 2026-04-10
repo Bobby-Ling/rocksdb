@@ -85,7 +85,8 @@ class Compaction {
              CompactionReason compaction_reason = CompactionReason::kUnknown,
              BlobGarbageCollectionPolicy blob_garbage_collection_policy =
                  BlobGarbageCollectionPolicy::kUseDefault,
-             double blob_garbage_collection_age_cutoff = -1);
+             double blob_garbage_collection_age_cutoff = -1,
+             std::shared_ptr<PartitionTable::Plan> compaction_plan = nullptr);
 
   // No copying allowed
   Compaction(const Compaction&) = delete;
@@ -362,6 +363,10 @@ class Compaction {
     return notify_on_compaction_completion_;
   }
 
+  const std::shared_ptr<PartitionTable::Plan>& GetCompactionPlan() const {
+    return compaction_plan_;
+  }
+
   static constexpr int kInvalidLevel = -1;
   // Evaluate penultimate output level. If the compaction supports
   // per_key_placement feature, it returns the penultimate level number.
@@ -495,6 +500,8 @@ class Compaction {
   // Key range for penultimate level output
   Slice penultimate_level_smallest_user_key_;
   Slice penultimate_level_largest_user_key_;
+
+  std::shared_ptr<PartitionTable::Plan> compaction_plan_;
 };
 
 #ifndef NDEBUG

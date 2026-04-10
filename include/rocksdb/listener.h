@@ -128,6 +128,10 @@ enum class CompactionReason : int {
   kFIFOReduceNumFiles,
   // [FIFO] files with creation time < (current_time - interval)
   kFIFOTtl,
+  // [Delta] Merge
+  kDeltaMerge,
+  // [Delta] Split
+  kDeltaSplit,
   // Manual compaction
   kManualCompaction,
   // DB::SuggestCompactRange() marked files for compaction

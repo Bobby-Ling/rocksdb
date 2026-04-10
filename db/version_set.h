@@ -39,6 +39,7 @@
 #include "db/dbformat.h"
 #include "db/file_indexer.h"
 #include "db/log_reader.h"
+#include "db/partition_table.h"
 #include "db/range_del_aggregator.h"
 #include "db/read_callback.h"
 #include "db/table_cache.h"
@@ -525,6 +526,9 @@ class VersionStorageInfo {
   // Return a human readable string that describes this version's contents.
   std::string DebugString(bool hex = false) const;
 
+  // Return delta-compaction-oriented per-SST summary grouped by partition.
+  std::string DeltaDebugString() const;
+
   uint64_t GetAverageValueSize() const {
     if (accumulated_num_non_deletions_ == 0) {
       return 0;
@@ -580,6 +584,16 @@ class VersionStorageInfo {
   bool RangeMightExistAfterSortedRun(const Slice& smallest_user_key,
                                      const Slice& largest_user_key,
                                      int last_level, int last_l0_idx);
+
+  const std::shared_ptr<PartitionTable> GetPartitionTable() const {
+    return partition_table_;
+  }
+
+  void SetPartitionTable(std::shared_ptr<PartitionTable> pt) {
+    partition_table_ = std::move(pt);
+  }
+
+  std::vector<FileMetaData*> GetFilesInPartition(PartitionID pid) const;
 
  private:
   void ComputeCompensatedSizes();
@@ -684,6 +698,9 @@ class VersionStorageInfo {
   // current seqnum, which needs to be protected as a snapshot can still be
   // created that references it.
   SequenceNumber oldest_snapshot_seqnum_ = 0;
+
+  // CF内每个Version一个分区表
+  std::shared_ptr<PartitionTable> partition_table_;
 
   // Level that should be compacted next and its compaction score.
   // Score < 1 means compaction is not strictly needed.  These fields

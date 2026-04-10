@@ -22,6 +22,7 @@
 #include "db/compaction/compaction_picker_fifo.h"
 #include "db/compaction/compaction_picker_level.h"
 #include "db/compaction/compaction_picker_universal.h"
+#include "db/compaction/compaction_picker_delta.h"
 #include "db/db_impl/db_impl.h"
 #include "db/internal_stats.h"
 #include "db/job_context.h"
@@ -281,6 +282,14 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
     // of them, these options don't really mean anything
     result.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
     result.level0_stop_writes_trigger = std::numeric_limits<int>::max();
+  }
+
+  if (result.compaction_style == kCompactionStyleDelta) {
+    // TODO(lcr): 先这样实现
+    result.num_levels = 1;
+    result.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
+    result.level0_stop_writes_trigger = std::numeric_limits<int>::max();
+    result.level0_file_num_compaction_trigger *= result.compaction_options_delta.max_partitions;
   }
 
   if (result.max_bytes_for_level_multiplier <= 0) {
@@ -602,6 +611,9 @@ ColumnFamilyData::ColumnFamilyData(
                      "Column family %s does not use any background compaction. "
                      "Compactions can only be done via CompactFiles\n",
                      GetName().c_str());
+    } else if (ioptions_.compaction_style == kCompactionStyleDelta) {
+      compaction_picker_.reset(
+          new DeltaCompactionPicker(ioptions_, &internal_comparator_));
 #endif  // !ROCKSDB_LITE
     } else {
       ROCKS_LOG_ERROR(ioptions_.logger,

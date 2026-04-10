@@ -93,6 +93,7 @@ void VersionEdit::Clear() {
   is_in_atomic_group_ = false;
   remaining_entries_ = 0;
   full_history_ts_low_.clear();
+  partition_table_edits.reset();
 }
 
 bool VersionEdit::EncodeTo(std::string* dst) const {

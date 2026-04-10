@@ -27,9 +27,11 @@
 #include "db/blob/blob_file_meta.h"
 #include "db/dbformat.h"
 #include "db/internal_stats.h"
+#include "db/partition_table.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
 #include "port/port.h"
+#include "rocksdb/advanced_options.h"
 #include "table/table_reader.h"
 #include "util/string_util.h"
 
@@ -346,26 +348,50 @@ class VersionBuilder::Rep {
       return Status::OK();
     }
 
-    assert(level_files[0]);
-    UpdateExpectedLinkedSsts(level_files[0]->fd.GetNumber(),
-                             level_files[0]->oldest_blob_file_number,
-                             expected_linked_ssts);
-
-    for (size_t i = 1; i < level_files.size(); ++i) {
-      assert(level_files[i]);
-      UpdateExpectedLinkedSsts(level_files[i]->fd.GetNumber(),
-                               level_files[i]->oldest_blob_file_number,
+    auto check_for_a_sorted_run =
+        [&](const std::vector<FileMetaData*> level_files) -> auto {
+      if (level_files.empty()) {
+        return Status::OK();
+      };
+      assert(level_files[0]);
+      UpdateExpectedLinkedSsts(level_files[0]->fd.GetNumber(),
+                               level_files[0]->oldest_blob_file_number,
                                expected_linked_ssts);
 
-      auto lhs = level_files[i - 1];
-      auto rhs = level_files[i];
+      for (size_t i = 1; i < level_files.size(); ++i) {
+        assert(level_files[i]);
+        UpdateExpectedLinkedSsts(level_files[i]->fd.GetNumber(),
+                                 level_files[i]->oldest_blob_file_number,
+                                 expected_linked_ssts);
+
+        auto lhs = level_files[i - 1];
+        auto rhs = level_files[i];
 
 #ifndef NDEBUG
-      auto pair = std::make_pair(&lhs, &rhs);
-      TEST_SYNC_POINT_CALLBACK(sync_point, &pair);
+        auto pair = std::make_pair(&lhs, &rhs);
+        TEST_SYNC_POINT_CALLBACK(sync_point, &pair);
 #endif
 
-      const Status s = checker(lhs, rhs);
+        const Status s = checker(lhs, rhs);
+        if (!s.ok()) {
+          return s;
+        }
+      }
+      return Status::OK();
+    };
+
+    if (level == 0 && vstorage->GetPartitionTable() != nullptr) {
+      const auto pt = vstorage->GetPartitionTable();
+      if (pt->IsInitialized()) {
+        for (PartitionID pid : pt->GetPartitions()) {
+          auto s =check_for_a_sorted_run(vstorage->GetFilesInPartition(pid));
+          if (!s.ok()) {
+            return s;
+          }
+        }
+      }
+    } else {
+      auto s = check_for_a_sorted_run(level_files);
       if (!s.ok()) {
         return s;
       }

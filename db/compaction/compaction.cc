@@ -217,7 +217,8 @@ Compaction::Compaction(
     bool _deletion_compaction, bool l0_files_might_overlap,
     CompactionReason _compaction_reason,
     BlobGarbageCollectionPolicy _blob_garbage_collection_policy,
-    double _blob_garbage_collection_age_cutoff)
+    double _blob_garbage_collection_age_cutoff,
+    std::shared_ptr<PartitionTable::Plan> _compaction_plan)
     : input_vstorage_(vstorage),
       start_level_(_inputs[0].level),
       output_level_(_output_level),
@@ -259,7 +260,8 @@ Compaction::Compaction(
               ? mutable_cf_options()->blob_garbage_collection_age_cutoff
               : _blob_garbage_collection_age_cutoff),
       penultimate_level_(EvaluatePenultimateLevel(
-          immutable_options_, start_level_, output_level_)) {
+          immutable_options_, start_level_, output_level_)),
+        compaction_plan_(std::move(_compaction_plan)) {
   MarkFilesBeingCompacted(true);
   if (is_manual_compaction_) {
     compaction_reason_ = CompactionReason::kManualCompaction;

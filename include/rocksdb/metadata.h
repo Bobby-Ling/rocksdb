@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "db/partition_table.h"
 #include "rocksdb/options.h"
 #include "rocksdb/types.h"
 
@@ -83,11 +84,13 @@ struct SstFileMetaData : public FileStorageInfo {
                   uint64_t _oldest_blob_file_number,
                   uint64_t _oldest_ancester_time, uint64_t _file_creation_time,
                   std::string& _file_checksum,
-                  std::string& _file_checksum_func_name)
+                  std::string& _file_checksum_func_name,
+                  PartitionID _partition_id)
       : smallest_seqno(_smallest_seqno),
         largest_seqno(_largest_seqno),
         smallestkey(_smallestkey),
         largestkey(_largestkey),
+        partition_id(_partition_id),
         num_reads_sampled(_num_reads_sampled),
         being_compacted(_being_compacted),
         num_entries(0),
@@ -116,11 +119,11 @@ struct SstFileMetaData : public FileStorageInfo {
     file_checksum = _file_checksum;
     file_checksum_func_name = _file_checksum_func_name;
   }
-
   SequenceNumber smallest_seqno = 0;  // Smallest sequence number in file.
   SequenceNumber largest_seqno = 0;   // Largest sequence number in file.
   std::string smallestkey;            // Smallest user defined key in the file.
   std::string largestkey;             // Largest user defined key in the file.
+  PartitionID partition_id = kInvalidPartitionID;
   uint64_t num_reads_sampled = 0;     // How many times the file is read.
   bool being_compacted =
       false;  // true if the file is currently being compacted.

@@ -1,0 +1,379 @@
+#include "db/partition_table.h"
+
+#include <cassert>
+#include <sstream>
+
+namespace ROCKSDB_NAMESPACE {
+
+PartitionTable::PartitionTableStorage::iterator PartitionTable::FindByPid(
+    PartitionID pid) {
+  auto it = pid_index.find(pid);
+  return it == pid_index.end() ? partition_storage.end() : it->second;
+}
+
+PartitionTable::PartitionTableStorage::const_iterator PartitionTable::FindByPid(
+    PartitionID pid) const {
+  auto it = pid_index.find(pid);
+  return it == pid_index.end() ? partition_storage.end() : it->second;
+}
+
+PartitionInfo PartitionTable::BuildPartitionInfo(
+    PartitionTableStorage::const_iterator it) const {
+  assert(it != partition_storage.end());
+  PartitionInfo info = it->second;
+  info.left_bound = it->first;
+  auto next = std::next(it);
+  info.right_bound =
+      (next == partition_storage.end()) ? std::nullopt : next->first;
+  return info;
+}
+
+void PartitionTable::EraseGrowthIndex(PartitionTableStorage::iterator pm_it) {
+  int64_t rate = pm_it->second.growth_rate;
+  auto [gr_begin, gr_end] = growth_rate_index.equal_range(rate);
+  for (auto gr_it = gr_begin; gr_it != gr_end; ++gr_it) {
+    if (gr_it->second == pm_it) {
+      growth_rate_index.erase(gr_it);
+      return;
+    }
+  }
+}
+
+PartitionInfo PartitionTable::FindPartition(const Slice& user_key) const {
+  assert(!partition_storage.empty());
+
+  auto it = partition_storage.upper_bound(user_key.ToString());
+  if (it == partition_storage.begin()) {
+    return BuildPartitionInfo(it);
+  }
+  --it;
+  return BuildPartitionInfo(it);
+}
+
+std::vector<PartitionID> PartitionTable::FindPartitionInRange(
+    const std::optional<std::string>& left,
+    const std::optional<std::string>& right) const {
+  assert(!partition_storage.empty());
+
+  // 确定起始迭代器：找到第一个与 [left, right) 有交集的分区
+  PartitionTableStorage::const_iterator start_it;
+  if (!left.has_value()) {
+    start_it = partition_storage.begin();  // left = -INF，从第一个分区开始
+  } else {
+    start_it = partition_storage.upper_bound(left);
+    // upper_bound 找到第一个 key > left 的位置
+    // 自减后得到 key <= left 的最大分区，即覆盖 left 的分区
+    if (start_it != partition_storage.begin()) {
+      --start_it;
+    } else {
+      return {};  // left 比 map 中所有 key 都小，不应该发生（第一个分区 key 是 nullopt）
+    }
+  }
+
+  // 确定结束迭代器：第一个 left_bound >= right 的分区
+  PartitionTableStorage::const_iterator end_it;
+  if (!right.has_value()) {
+    end_it = partition_storage.end();  // right = +INF，遍历到最后
+  } else {
+    end_it = partition_storage.lower_bound(right);
+    // lower_bound 找到第一个 key >= right 的位置
+  }
+
+  // 收集所有在 [start_it, end_it) 范围内的 PartitionID
+  std::vector<PartitionID> pids;
+  for (auto it = start_it; it != end_it; ++it) {
+    pids.push_back(it->second.partition_id);
+  }
+
+  return pids;
+}
+
+
+PartitionID PartitionTable::InitFirstPartition() {
+  if (!partition_storage.empty()) {
+    return kInvalidPartitionID;
+  }
+
+  PartitionID pid = next_partition_id_++;
+  PartitionInfo info;
+  info.growth_rate = 0;
+  info.partition_id = pid;
+  info.left_bound = std::nullopt;
+  auto [it, inserted] =
+      partition_storage.emplace(std::nullopt, std::move(info));
+  assert(inserted);
+  pid_index.emplace(pid, it);
+  growth_rate_index.emplace(0, it);
+  return pid;
+}
+
+PartitionID PartitionTable::AddPartition(const std::string& left_bound) {
+  if (left_bound.empty() || partition_storage.empty() ||
+      partition_storage.find(left_bound) != partition_storage.end()) {
+    return kInvalidPartitionID;
+  }
+
+  PartitionID pid = next_partition_id_++;
+  PartitionInfo info;
+  info.growth_rate = 0;
+  info.partition_id = pid;
+  info.left_bound = left_bound;
+  auto [it, inserted] = partition_storage.emplace(left_bound, std::move(info));
+  assert(inserted);
+  pid_index.emplace(pid, it);
+  growth_rate_index.emplace(0, it);
+  return pid;
+}
+
+void PartitionTable::RemovePartition(PartitionID pid) {
+  auto id_it = FindByPid(pid);
+  assert(id_it != partition_storage.end());
+
+  EraseGrowthIndex(id_it);
+  pid_index.erase(pid);
+  partition_storage.erase(id_it);
+}
+
+void PartitionTable::UpdateGrowthRate(PartitionID pid, int64_t new_rate) {
+  auto id_it = FindByPid(pid);
+  assert(id_it != partition_storage.end());
+  EraseGrowthIndex(id_it);
+  id_it->second.growth_rate = new_rate;
+  growth_rate_index.emplace(new_rate, id_it);
+}
+
+PartitionInfo PartitionTable::GetLowestGrowthPartition() const {
+  assert(!growth_rate_index.empty());
+  return growth_rate_index.begin()->second->second;
+}
+
+PartitionInfo PartitionTable::GetHighestGrowthPartition() const {
+  assert(!growth_rate_index.empty());
+  return growth_rate_index.rbegin()->second->second;
+}
+
+std::vector<PartitionID> PartitionTable::GetPartitions() const {
+  std::vector<PartitionID> pids;
+  pids.reserve(partition_storage.size());
+  for (const auto& kv : partition_storage) {
+    pids.push_back(kv.second.partition_id);
+  }
+  return pids;
+}
+
+std::vector<PartitionInfo> PartitionTable::GetPartitionInfos() const {
+  std::vector<PartitionInfo> partitions;
+  partitions.reserve(partition_storage.size());
+  for (auto it = partition_storage.begin(); it != partition_storage.end();
+       ++it) {
+    partitions.push_back(BuildPartitionInfo(it));
+  }
+  return partitions;
+}
+
+std::string PartitionTable::DebugString() const {
+  std::ostringstream oss;
+  oss << "num_partitions=" << partition_storage.size()
+      << " next_partition_id=" << next_partition_id_;
+
+  if (partition_storage.empty()) {
+    oss << " partitions=[]";
+    return oss.str();
+  }
+
+  oss << " partitions=[";
+  bool first = true;
+  for (auto it = partition_storage.begin(); it != partition_storage.end();
+       ++it) {
+    if (!first) {
+      oss << ", ";
+    }
+    first = false;
+
+    const PartitionInfo info = BuildPartitionInfo(it);
+    oss << "{pid=" << info.partition_id << " growth=" << info.growth_rate
+        << " range=["
+        << (info.left_bound.has_value() ? info.left_bound.value()
+                                        : std::string("-INF"))
+        << ","
+        << (info.right_bound.has_value() ? info.right_bound.value()
+                                         : std::string("+INF"))
+        << ")}";
+  }
+  oss << "]";
+  return oss.str();
+}
+
+std::optional<PartitionTable::SplitPlan> PartitionTable::GetSplitPlan() const {
+  if (partition_storage.size() >= kMaxPartitions || growth_rate_index.empty()) {
+    return std::nullopt;
+  }
+  int64_t total = 0;
+  for (const auto& kv : partition_storage) total += kv.second.growth_rate;
+  int64_t avg = total / static_cast<int64_t>(partition_storage.size());
+  if (avg <= 0) return std::nullopt;
+
+  auto hi_it = growth_rate_index.rbegin();
+  if (static_cast<double>(hi_it->first) <= avg * kSplitGrowthThreshold) {
+    return std::nullopt;
+  }
+  auto pm_it = hi_it->second;
+  SplitPlan plan;
+  plan.pid = pm_it->second.partition_id;
+  plan.new_pid = next_partition_id_;
+  return plan;
+}
+
+void PartitionTable::Split(PartitionID pid, const std::string& new_boundary) {
+  auto id_it = FindByPid(pid);
+  assert(id_it != partition_storage.end());
+
+  if (new_boundary.empty() ||
+      partition_storage.find(new_boundary) != partition_storage.end()) {
+    return;
+  }
+
+  const auto curr = id_it;
+  const std::string old_lb =
+      curr->first.has_value() ? curr->first.value() : std::string();
+  if (new_boundary <= old_lb) {
+    return;
+  }
+  auto next_it = std::next(curr);
+  if (next_it != partition_storage.end() && next_it->first.has_value() &&
+      new_boundary >= next_it->first.value()) {
+    return;
+  }
+
+  int64_t old_rate = curr->second.growth_rate;
+  int64_t half_rate = old_rate / 2;
+
+  PartitionID new_pid = AddPartition(new_boundary);
+  if (new_pid == kInvalidPartitionID) {
+    return;
+  }
+  UpdateGrowthRate(pid, old_rate - half_rate);
+  UpdateGrowthRate(new_pid, half_rate);
+}
+
+std::optional<PartitionTable::MergePlan> PartitionTable::GetMergePlan() const {
+  if (partition_storage.size() < 2 || growth_rate_index.empty()) {
+    return std::nullopt;
+  }
+  int64_t total = 0;
+  for (const auto& kv : partition_storage) total += kv.second.growth_rate;
+  int64_t avg = total / static_cast<int64_t>(partition_storage.size());
+  if (avg <= 0) return std::nullopt;
+
+  auto lo_it = growth_rate_index.begin();
+  if (static_cast<double>(lo_it->first) >= avg * kMergeGrowthThreshold) {
+    return std::nullopt;
+  }
+
+  auto merge_pm_it = lo_it->second;
+  auto next_it = std::next(merge_pm_it);
+  if (next_it == partition_storage.end()) {
+    if (merge_pm_it == partition_storage.begin()) {
+      return std::nullopt;
+    }
+    auto prev_it = std::prev(merge_pm_it);
+    MergePlan plan;
+    plan.left_pid = prev_it->second.partition_id;
+    plan.right_pid = merge_pm_it->second.partition_id;
+    return plan;
+  }
+  MergePlan plan;
+  plan.left_pid = merge_pm_it->second.partition_id;
+  plan.right_pid = next_it->second.partition_id;
+  return plan;
+}
+
+void PartitionTable::Merge(PartitionID left_pid, PartitionID right_pid) {
+  auto left_it = FindByPid(left_pid);
+  auto right_it = FindByPid(right_pid);
+  assert(left_it != partition_storage.end());
+  assert(right_it != partition_storage.end());
+  assert(std::next(left_it) == right_it);
+
+  int64_t merged_rate =
+      left_it->second.growth_rate + right_it->second.growth_rate;
+
+  const auto new_left = left_it->first;
+
+  EraseGrowthIndex(left_it);
+  EraseGrowthIndex(right_it);
+
+  pid_index.erase(left_pid);
+
+  auto right_node = partition_storage.extract(right_it);
+  right_node.key() = new_left;
+  right_node.mapped().left_bound = new_left;
+  right_node.mapped().growth_rate = merged_rate;
+
+  partition_storage.erase(left_it);
+
+  auto insert_result = partition_storage.insert(std::move(right_node));
+  auto new_it = insert_result.position;
+  pid_index[right_pid] = new_it;
+  growth_rate_index.emplace(merged_rate, new_it);
+}
+
+PartitionTable::CompactionType PartitionTable::NeedCompaction() const {
+  int64_t pt_total = 0;
+  for (const auto& kv : partition_storage) {
+    pt_total += kv.second.growth_rate;
+  }
+  if (NumPartitions() < 2) {
+    return CompactionType::kNone;
+  }
+  int64_t pt_avg = pt_total / NumPartitions();
+  if (pt_avg > 0) {
+    int64_t highest_rate = growth_rate_index.rbegin()->first;
+    int64_t lowest_rate = growth_rate_index.begin()->first;
+    if (static_cast<double>(highest_rate) > pt_avg * kSplitGrowthThreshold) {
+      return CompactionType::kSplit;
+    }
+    if (static_cast<double>(lowest_rate) < pt_avg * kMergeGrowthThreshold) {
+      return CompactionType::kMerge;
+    }
+  }
+  return CompactionType::kNone;
+}
+
+std::shared_ptr<PartitionTable> PartitionTable::ApplyToNewTable(
+    const PartitionTableEdits& pt_edits) const {
+  auto new_pt = std::make_shared<PartitionTable>(*this);
+  for (const auto& edit : pt_edits.GetEdits()) {
+    if (edit->type == PartitionTableEdits::Edit::Type::kSplit) {
+      auto split = std::static_pointer_cast<PartitionTableEdits::Split>(edit);
+      const auto& plan = split->plan;
+      new_pt->Split(plan.pid, split->new_boundary);
+    } else if (edit->type == PartitionTableEdits::Edit::Type::kMerge) {
+      auto merge = std::static_pointer_cast<PartitionTableEdits::Merge>(edit);
+      const auto& plan = merge->plan;
+      new_pt->Merge(plan.left_pid, plan.right_pid);
+    } else if (edit->type == PartitionTableEdits::Edit::Type::kPartitionUpdate) {
+      auto update =
+          std::static_pointer_cast<PartitionTableEdits::PartitionUpdate>(edit);
+      PartitionID pid = update->pid;
+      int64_t key_count = static_cast<int64_t>(update->key_count);
+      // 此时可能已经Compaction了, pid可能不存在
+      auto partition = new_pt->GetPartition(pid);
+      if (partition != std::nullopt) {
+        int64_t old_rate = partition->growth_rate;
+        int64_t new_rate = old_rate + key_count;
+        if (old_rate != new_rate) {
+          new_pt->UpdateGrowthRate(pid, new_rate);
+        }
+      }
+    } else if (edit->type == PartitionTableEdits::Edit::Type::kInit) {
+      auto init =
+          std::static_pointer_cast<PartitionTableEdits::InitPartitionTable>(edit);
+      new_pt = init->pt;
+    }
+  }
+  // edites.clear();
+  return new_pt;
+};
+
+}  // namespace ROCKSDB_NAMESPACE
