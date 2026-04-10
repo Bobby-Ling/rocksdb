@@ -1,0 +1,38 @@
+buildType:
+  default: release
+  description: 选择构建类型
+  choices:
+    release:
+      short: Release
+      long: Optimize generated code
+      buildType: Release
+    debug:
+      short: Debug
+      long: Emit debug information
+      buildType: Debug
+      settings:
+        ROCKSDB_BACKTRACE: ON
+        ROCKSDB_BACKTRACE_USE_CPPTRACE: ON
+
+Sanitizer:
+  default: off
+  description: TSAN和ASAN不能同时使用
+  choices:
+    off:
+      short: No Sanitizer
+      long: Disable all sanitizers
+      settings:
+        USE_ASAN: OFF
+        USE_TSAN: OFF
+    asan:
+      short: ASAN
+      long: Enable Address Sanitizer
+      settings:
+        USE_ASAN: ON
+        USE_TSAN: OFF
+    tsan:
+      short: TSAN
+      long: Enable Thread Sanitizer
+      settings:
+        USE_ASAN: OFF
+        USE_TSAN: ON

@@ -184,6 +184,55 @@ if(WIN32 AND MSVC)
   endif()
 endif()
 
+option(ROCKSDB_BACKTRACE "build with backtrace support" OFF)
+option(ROCKSDB_BACKTRACE_USE_CPPTRACE "Use cpptrace for backtraces instead of execinfo" OFF)
+
+if(ROCKSDB_BACKTRACE)
+  if(MSVC OR WIN32 OR CMAKE_SYSTEM_NAME MATCHES "SunOS" OR CMAKE_SYSTEM_NAME MATCHES "Cygwin")
+    message(STATUS "ROCKSDB_BACKTRACE is not supported on this platform in CMake build")
+  else()
+    include(CheckCXXSourceCompiles)
+    set(_OLD_CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
+
+    set(CMAKE_REQUIRED_LIBRARIES "")
+    CHECK_CXX_SOURCE_COMPILES("\
+#include <execinfo.h>
+int main() {
+  void* frames[1];
+  backtrace_symbols(frames, backtrace(frames, 1));
+  return 0;
+}
+" HAVE_BACKTRACE)
+
+    if(HAVE_BACKTRACE)
+      add_definitions(-DROCKSDB_BACKTRACE)
+      if(ROCKSDB_BACKTRACE_USE_CPPTRACE)
+        add_definitions(-DROCKSDB_BACKTRACE_USE_CPPTRACE)
+        include(cpptrace.cmake)
+        list(APPEND THIRDPARTY_LIBS cpptrace::cpptrace)
+      endif()
+    else()
+      set(CMAKE_REQUIRED_LIBRARIES "execinfo")
+      CHECK_CXX_SOURCE_COMPILES("\
+#include <execinfo.h>
+int main() {
+  void* frames[1];
+  backtrace_symbols(frames, backtrace(frames, 1));
+  return 0;
+}
+" HAVE_BACKTRACE_WITH_EXECINFO)
+      if(HAVE_BACKTRACE_WITH_EXECINFO)
+        add_definitions(-DROCKSDB_BACKTRACE)
+        list(APPEND THIRDPARTY_LIBS execinfo)
+      else()
+        message(WARNING "ROCKSDB_BACKTRACE=ON but backtrace support is unavailable; building without it")
+      endif()
+    endif()
+
+    set(CMAKE_REQUIRED_LIBRARIES ${_OLD_CMAKE_REQUIRED_LIBRARIES})
+  endif()
+endif()
+
 if(MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /nologo /EHsc /GS /Gd /GR /GF /fp:precise /Zc:wchar_t /Zc:forScope /errorReport:queue")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /FC /d2Zi+ /W4 /wd4127 /wd4800 /wd4996 /wd4351 /wd4100 /wd4204 /wd4324")

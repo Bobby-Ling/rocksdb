@@ -38,6 +38,10 @@ void* SaveStack(int* /*num_frames*/, int /*first_frames_to_skip*/) {
 
 #include "port/lang.h"
 
+#ifdef ROCKSDB_BACKTRACE_USE_CPPTRACE
+#include <cpptrace/cpptrace.hpp>
+#endif
+
 namespace ROCKSDB_NAMESPACE {
 namespace port {
 
@@ -161,7 +165,11 @@ static void StackTraceHandler(int sig) {
   signal(sig, SIG_DFL);
   fprintf(stderr, "Received signal %d (%s)\n", sig, strsignal(sig));
   // skip the top three signal handler related frames
+#ifdef ROCKSDB_BACKTRACE_USE_CPPTRACE
+  cpptrace::generate_trace().print();
+#else
   PrintStack(3);
+#endif
 
   // Efforts to fix or suppress TSAN warnings "signal-unsafe call inside of
   // a signal" have failed, so just warn the user about them.
@@ -180,6 +188,23 @@ static void StackTraceHandler(int sig) {
   raise(sig);
 }
 
+#ifdef ROCKSDB_BACKTRACE_USE_CPPTRACE
+void cpp_exception_terminate_handler() {
+    std::exception_ptr exptr = std::current_exception();
+    if (exptr != nullptr) {
+        try {
+            std::rethrow_exception(exptr);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "Uncaught exception: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "Uncaught exception of unknown type\n");
+        }
+    }
+    cpptrace::generate_trace().print();
+    // std::abort();
+}
+#endif
+
 void InstallStackTraceHandler() {
   // just use the plain old signal as it's simple and sufficient
   // for this use case
@@ -187,6 +212,10 @@ void InstallStackTraceHandler() {
   signal(SIGSEGV, StackTraceHandler);
   signal(SIGBUS, StackTraceHandler);
   signal(SIGABRT, StackTraceHandler);
+
+#ifdef ROCKSDB_BACKTRACE_USE_CPPTRACE
+  std::set_terminate(cpp_exception_terminate_handler);
+#endif
 }
 
 }  // namespace port
