@@ -1,0 +1,72 @@
+{
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "editor.formatOnSaveMode": "modifications",
+    "editor.formatOnSave": true,
+    "editor.formatOnType": true,
+    "[c]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+        "editor.tabSize": 2,
+        "editor.indentSize": "tabSize",
+        "editor.detectIndentation": false
+    },
+    "[cpp]": {
+        "editor.defaultFormatter": "wallenwang.ccls-plus",
+        "editor.tabSize": 2,
+        "editor.indentSize": "tabSize",
+        "editor.detectIndentation": false
+    },
+    "[h]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+        "editor.tabSize": 2,
+        "editor.indentSize": "tabSize",
+        "editor.detectIndentation": false
+    },
+    "[hpp]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+        "editor.tabSize": 2,
+        "editor.indentSize": "tabSize",
+        "editor.detectIndentation": false
+    },
+    "C_Cpp.formatting": "clangFormat",
+    "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+    "cmake.options.statusBarVisibility": "compact",
+    "cmake.generator": "Unix Makefiles",
+    "testMate.cpp.test.executables": "build/bin/*test",
+    "testMate.cpp.discovery.loadOnStartup": true,
+    "testMate.cpp.discovery.strictPattern": true,
+    "cmake.options.advanced": {
+        "build": {
+            "statusBarVisibility": "inherit",
+            "inheritDefault": "visible"
+        },
+        "launch": {
+            "statusBarVisibility": "inherit",
+            "inheritDefault": "visible"
+        },
+        "debug": {
+            "statusBarVisibility": "inherit",
+            "inheritDefault": "visible"
+        },
+        "ctest": {
+            "statusBarVisibility": "hidden"
+        },
+        "cpack": {
+            "statusBarVisibility": "hidden"
+        },
+        "workflow": {
+            "statusBarVisibility": "hidden"
+        },
+        "buildTarget": {
+            "statusBarLength": 10
+        },
+        "kit": {
+            "statusBarLength": 10
+        }
+    },
+    "cmake.buildDirectory": "${workspaceFolder}/build/${variant:buildType}-${variant:Sanitizer}",
+    "cmake.copyCompileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "ccls.cache.fullLoadOnInitialize": true,
+    "ccls.misc.compilationDatabaseDirectory": "build",
+    "specstory.cloudSync.enabled": "never",
+}

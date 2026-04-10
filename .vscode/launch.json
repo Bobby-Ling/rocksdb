@@ -1,0 +1,78 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python 调试程序: 包含参数的当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}",
+            "cwd": "${workspaceFolder}/"
+        },
+        {
+            "name": "Python 调试程序: 包含参数的当前文件在当前目录",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}",
+            "cwd": "${fileDirname}"
+        },
+        {
+            "type": "lldb",
+            "request": "attach",
+            "name": "(lldb) Attach",
+            // sudo sysctl -w kernel.yama.ptrace_scope=0
+            "program": "${command:cmake.launchTargetPath}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "(lldb) Launch",
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "cwd": "${command:cmake.launchTargetDirectory}",
+            "env": {},
+        },
+        {
+            "name": "(gdb) Cmake Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            // Resolved by CMake Tools:
+            "program": "${command:cmake.launchTargetPath}",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${command:cmake.launchTargetDirectory}",
+            "environment": [
+                {
+                    // add the directory where our target was built to the PATHs
+                    // it gets resolved by CMake Tools:
+                    "name": "PATH",
+                    "value": "${env:PATH}:${command:cmake.getLaunchTargetDirectory}"
+
+                },
+            ],
+            // "externalConsole": true,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "防止pwd错误, 找不到文件",
+                    "text": "cd ${workspaceFolder}",
+                    "ignoreFailures": false
+                },
+                {
+                    "text": "source .gdbinit",
+                    // setupCommands中包含continue命令需要"ignoreFailures": true
+                    // https://github.com/microsoft/vscode-cpptools/issues/7488
+                    "ignoreFailures": true
+                },
+            ]
+        },
+    ]
+}

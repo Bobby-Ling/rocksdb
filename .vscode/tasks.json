@@ -1,0 +1,86 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cmake build",
+            "type": "cmake",
+            "command": "build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "clang-tidy-cli",
+            "type": "shell",
+            "command": "clang-tidy",
+            "args": [
+                "${relativeFile}",
+                "-p=build/"
+            ],
+            "detail": "对当前文件运行clang-tidy",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {},
+            "presentation": {
+                "reveal": "never",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                {
+                    "base": "$gcc",
+                    "source": "clang-tidy-cli",
+                    "pattern": [
+                        {
+                            "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error|note):\\s+(.*)\\[(.*)\\]$",
+                            "file": 1,
+                            "line": 2,
+                            "column": 3,
+                            "severity": 4,
+                            "message": 5,
+                            "code": 6
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "label": "clang-tidy-cli-all",
+            "type": "shell",
+            "command": "./scripts/clang-tidy.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "detail": "对工作区所有文件运行clang-tidy",
+            "group": {},
+            "presentation": {
+                "reveal": "never",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                {
+                    "base": "$gcc",
+                    "source": "clang-tidy-cli-all",
+                    "pattern": [
+                        {
+                            "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error|note):\\s+(.*)\\[(.*)\\]$",
+                            "file": 1,
+                            "line": 2,
+                            "column": 3,
+                            "severity": 4,
+                            "message": 5,
+                            "code": 6
+                        }
+                    ]
+                }
+            ],
+        }
+    ]
+}

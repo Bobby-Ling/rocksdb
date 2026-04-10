@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "ms-vscode.cmake-tools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "wallenwang.ccls-plus",
+        "ms-vscode.cpptools",
+        "mhutchie.git-graph",
+        "vadimcn.vscode-lldb",
+    ]
+}
