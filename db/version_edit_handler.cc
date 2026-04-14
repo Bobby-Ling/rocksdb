@@ -19,6 +19,33 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+namespace {
+
+std::shared_ptr<PartitionTable> NewEmptyPartitionTable(ColumnFamilyData* cfd) {
+  assert(cfd != nullptr);
+  const auto& delta_options =
+      cfd->GetLatestMutableCFOptions()->compaction_options_delta;
+  return std::make_shared<PartitionTable>(
+      delta_options.max_partitions,
+      delta_options.partition_split_growth_threshold,
+      delta_options.partition_merge_growth_threshold);
+}
+
+Status ApplyPartitionTableState(const VersionEdit& edit, ColumnFamilyData* cfd,
+                                std::shared_ptr<PartitionTable> table) {
+  assert(table != nullptr);
+  assert(cfd != nullptr);
+  assert(edit.GetPartitionTableSnapshot() != nullptr);
+  // GetPartitionTableSnapshot就是最新的
+  *table = *edit.GetPartitionTableSnapshot();
+  // if (!edit.GetPartitionTableEdits()->GetEdits().empty()) {
+  //   *table = *table->ApplyToNewTable(*edit.GetPartitionTableEdits());
+  // }
+  return Status::OK();
+}
+
+}  // namespace
+
 void VersionEditHandlerBase::Iterate(log::Reader& reader,
                                      Status* log_read_status) {
   Slice record;
@@ -31,6 +58,7 @@ void VersionEditHandlerBase::Iterate(log::Reader& reader,
   while (reader.LastRecordEnd() < max_manifest_read_size_ && s.ok() &&
          reader.ReadRecord(&record, &scratch) && log_read_status->ok()) {
     VersionEdit edit;
+    // 很可能不包含pt snapshot, 此时pt snapshot为nullptr
     s = edit.DecodeFrom(record);
     if (!s.ok()) {
       break;
@@ -489,6 +517,7 @@ ColumnFamilyData* VersionEditHandler::CreateCfAndInit(
     cf_to_missing_blob_files_high_.emplace(edit.column_family_,
                                            kInvalidBlobFileNumber);
   }
+  cf_to_partition_table_[edit.column_family_] = NewEmptyPartitionTable(cfd);
   return cfd;
 }
 
@@ -508,6 +537,7 @@ ColumnFamilyData* VersionEditHandler::DestroyCfAndCleanup(
            cf_to_missing_blob_files_high_.end());
     cf_to_missing_blob_files_high_.erase(missing_blob_files_high_iter);
   }
+  cf_to_partition_table_.erase(edit.column_family_);
   ColumnFamilyData* ret =
       version_set_->GetColumnFamilySet()->GetColumnFamily(edit.column_family_);
   assert(ret != nullptr);
@@ -531,6 +561,11 @@ Status VersionEditHandler::MaybeCreateVersion(const VersionEdit& /*edit*/,
                           version_set_->current_version_number_++);
     s = builder->SaveTo(v->storage_info());
     if (s.ok()) {
+      auto partition_table_iter = cf_to_partition_table_.find(cfd->GetID());
+      if (partition_table_iter != cf_to_partition_table_.end() &&
+          partition_table_iter->second != nullptr) {
+        v->storage_info()->SetPartitionTable(partition_table_iter->second);
+      }
       // Install new version
       v->PrepareAppend(
           *cfd->GetLatestMutableCFOptions(),
@@ -607,6 +642,18 @@ Status VersionEditHandler::ExtractInfoFromVersionEdit(ColumnFamilyData* cfd,
     if (edit.HasFullHistoryTsLow()) {
       const std::string& new_ts = edit.GetFullHistoryTsLow();
       cfd->SetFullHistoryTsLow(new_ts);
+    }
+    // edit可能不包含partition table snapshot
+    if (edit.GetPartitionTableSnapshot() != nullptr) {
+      auto& partition_table = cf_to_partition_table_[cfd->GetID()];
+      // 已经VersionEditHandler::Initialize()过了
+      s = ApplyPartitionTableState(edit, cfd, partition_table);
+      if (!s.ok()) {
+        auto delta_options = cfd->GetLatestMutableCFOptions()->compaction_options_delta;
+        partition_table->SetOptions(delta_options.max_partitions, delta_options.partition_split_growth_threshold,
+                                    delta_options.partition_merge_growth_threshold);
+        return s;
+      }
     }
   }
 
@@ -806,6 +853,12 @@ Status VersionEditHandlerPointInTime::MaybeCreateVersion(
                                 version_set_->current_version_number_++);
     s = builder->SaveTo(version->storage_info());
     if (s.ok()) {
+      auto partition_table_iter = cf_to_partition_table_.find(cfd->GetID());
+      if (partition_table_iter != cf_to_partition_table_.end() &&
+          partition_table_iter->second != nullptr) {
+        version->storage_info()->SetPartitionTable(
+            partition_table_iter->second);
+      }
       version->PrepareAppend(
           *cfd->GetLatestMutableCFOptions(),
           !version_set_->db_options_->skip_stats_update_on_db_open);

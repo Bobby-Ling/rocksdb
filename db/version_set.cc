@@ -4838,24 +4838,24 @@ Status VersionSet::ProcessManifestWrites(
         return s;
       }
       uint32_t cf_id = versions[i]->cfd_->GetID();
-      for (const auto& e : batch_edits) {
+          ColumnFamilyData* cfd = column_family_set_->GetColumnFamily(cf_id);
+      assert(cfd != nullptr);
+          Version* current_version = cfd->current();
+          VersionStorageInfo* vstorage_info = current_version->storage_info();
+      auto current_pt = vstorage_info->GetPartitionTable();
+      auto applied_pt = current_pt;
+      for (auto& e : batch_edits) {
         if (e->column_family_ != cf_id) {
           continue;
         }
-        if (e->GetPartitionTableEdits()) {
-          ColumnFamilyData* cfd = column_family_set_->GetColumnFamily(cf_id);
-          Version* current_version = cfd->current();
-          VersionStorageInfo* vstorage_info = current_version->storage_info();
-          ROCKS_LOG_INFO(db_options_->info_log, "%s", vstorage_info->DeltaDebugString().c_str());
-          assert(cfd != nullptr);
-          versions[i]->storage_info()->SetPartitionTable(
-              current_version->storage_info()
-                  ->GetPartitionTable()
-                  ->ApplyToNewTable(*e->GetPartitionTableEdits()));
-          // TODO(lcr) batch_edits下的PartitionTable更新???
-          break;
+        if (!e->GetPartitionTableEdits()->GetEdits().empty()) {
+          applied_pt = applied_pt->ApplyToNewTable(*e->GetPartitionTableEdits());
         }
+        e->SetPartitionTableSnapshot(applied_pt);
       }
+      versions[i]->storage_info()->SetPartitionTable(std::move(applied_pt));
+      ROCKS_LOG_INFO(db_options_->info_log, "%s", vstorage_info->DeltaDebugString().c_str());
+
     }
   }
 
@@ -4962,6 +4962,9 @@ Status VersionSet::ProcessManifestWrites(
       }
     }
 
+    // new_descriptor_log是当前写入的Manifest
+    // 当Manifest文件过大时创建新的Manifest文件, WriteCurrentStateToManifest
+    // 然后在此基础上写batch_edits
     if (s.ok() && new_descriptor_log) {
       // This is fine because everything inside of this block is serialized --
       // only one thread can be here at the same time
@@ -5005,6 +5008,7 @@ Status VersionSet::ProcessManifestWrites(
 #ifndef NDEBUG
       size_t idx = 0;
 #endif
+      // 开始写入batch_edits
       for (auto& e : batch_edits) {
         std::string record;
         if (!e->EncodeTo(&record)) {
@@ -5475,6 +5479,16 @@ Status VersionSet::Recover(
                                /*track_missing_files=*/false,
                                /*no_error_if_files_missing=*/false, io_tracer_);
     handler.Iterate(reader, &log_read_status);
+
+    for (const auto& cfd : *column_family_set_) {
+      auto version = cfd->current();
+      assert(version != nullptr);
+      auto vstorage_info = version->storage_info();
+      if (vstorage_info->GetPartitionTable() != nullptr) {
+        ROCKS_LOG_INFO(db_options_->info_log, "Recoverd pt: %s", vstorage_info->DeltaDebugString().c_str());
+      }
+    }
+
     s = handler.status();
     if (s.ok()) {
       log_number = handler.GetVersionEditParams().log_number_;
@@ -6063,6 +6077,12 @@ Status VersionSet::WriteCurrentStateToManifest(
       const std::string& full_history_ts_low = iter->second.full_history_ts_low;
       if (!full_history_ts_low.empty()) {
         edit.SetFullHistoryTsLow(full_history_ts_low);
+      }
+
+      // 每个cfd都写一个初始状态
+      const auto& partition_table = vstorage->GetPartitionTable();
+      if (partition_table != nullptr) {
+        edit.SetPartitionTableSnapshot(partition_table);
       }
 
       edit.SetLastSequence(descriptor_last_sequence_);

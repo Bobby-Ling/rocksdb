@@ -585,6 +585,7 @@ class VersionStorageInfo {
                                      const Slice& largest_user_key,
                                      int last_level, int last_l0_idx);
 
+  // Version构造之后不为nullptr
   const std::shared_ptr<PartitionTable> GetPartitionTable() const {
     return partition_table_;
   }

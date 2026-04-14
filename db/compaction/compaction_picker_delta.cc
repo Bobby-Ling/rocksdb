@@ -38,10 +38,12 @@ Compaction* DeltaCompactionPicker::PickCompaction(
   }
   std::vector<FileMetaData*> files;
   int target_partition_count = 0;
+  CompactionReason reason;
   if (plan->type == PartitionTable::Plan::Type::kSplit) {
     auto split_plan = std::static_pointer_cast<PartitionTable::SplitPlan>(plan);
     files = vstorage->GetFilesInPartition(split_plan->pid);
     target_partition_count = 2;
+    reason = CompactionReason::kDeltaSplit;
   } else if (plan->type == PartitionTable::Plan::Type::kMerge) {
     auto merge_plan = std::static_pointer_cast<PartitionTable::MergePlan>(plan);
     auto left_files = vstorage->GetFilesInPartition(merge_plan->left_pid);
@@ -50,6 +52,7 @@ Compaction* DeltaCompactionPicker::PickCompaction(
     files.insert(files.end(), left_files.begin(), left_files.end());
     files.insert(files.end(), right_files.begin(), right_files.end());
     target_partition_count = 1;
+    reason = CompactionReason::kDeltaMerge;
   } else {
     assert(false);
     return nullptr;
@@ -89,13 +92,14 @@ Compaction* DeltaCompactionPicker::PickCompaction(
       target_partition_count,
       std::vector<FileMetaData*>(), false /* manual_compaction */, "",
       vstorage->CompactionScore(0), false /* deletion_compaction */, true,
-      CompactionReason::kUnknown, BlobGarbageCollectionPolicy::kUseDefault,
+      reason, BlobGarbageCollectionPolicy::kUseDefault,
       -1, plan);
 
   RegisterCompaction(c);
 
-  ROCKS_LOG_INFO(ioptions_.info_log, "Picked Delta Compaction for partition plan: %u",
-                 static_cast<uint32_t>(plan->type));
+  ROCKS_LOG_INFO(ioptions_.info_log,
+                 "Picked Delta Compaction for partition plan: %s",
+                 plan->DebugString().c_str());
 
   return c;
 }

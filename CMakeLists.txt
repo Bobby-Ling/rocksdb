@@ -239,7 +239,7 @@ if(MSVC)
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -W -Wextra -Wall -pthread")
   # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-compare -Wshadow -Wno-unused-parameter -Wno-unused-variable -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers -Wno-strict-aliasing -Wno-invalid-offsetof")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-compare -Wshadow -Wno-unused-parameter -Wno-unused-variable -Wno-unused-const-variable -Wno-unused-but-set-variable -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers -Wno-strict-aliasing -Wno-invalid-offsetof")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-compare -Wno-unused-parameter -Wno-unused-variable -Wno-unused-const-variable -Wno-unused-but-set-variable -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers -Wno-strict-aliasing -Wno-invalid-offsetof")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wstrict-prototypes")
   endif()
@@ -1047,6 +1047,10 @@ if(USE_FOLLY)
     third-party/folly/folly/synchronization/ParkingLot.cpp)
 endif()
 
+add_subdirectory(third-party/yalantinglibs)
+# list(APPEND THIRDPARTY_LIBS yalantinglibs)
+set(COMMON_THIRDPARTY_LIBS yalantinglibs)
+
 set(ROCKSDB_STATIC_LIB rocksdb${ARTIFACT_SUFFIX})
 set(ROCKSDB_SHARED_LIB rocksdb-shared${ARTIFACT_SUFFIX})
 
@@ -1114,12 +1118,12 @@ configure_file(util/build_version.cc.in ${BUILD_VERSION_CC} @ONLY)
 
 add_library(${ROCKSDB_STATIC_LIB} STATIC ${SOURCES} ${BUILD_VERSION_CC})
 target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE
-  ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+  ${THIRDPARTY_LIBS} ${SYSTEM_LIBS} PUBLIC ${COMMON_THIRDPARTY_LIBS})
 
 if(ROCKSDB_BUILD_SHARED)
   add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES} ${BUILD_VERSION_CC})
   target_link_libraries(${ROCKSDB_SHARED_LIB} PRIVATE
-    ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+    ${THIRDPARTY_LIBS} ${SYSTEM_LIBS} PUBLIC ${COMMON_THIRDPARTY_LIBS})
 
   if(WIN32)
     set_target_properties(${ROCKSDB_SHARED_LIB} PROPERTIES

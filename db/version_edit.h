@@ -71,6 +71,8 @@ enum Tag : uint32_t {
   kFullHistoryTsLow,
   kWalAddition2,
   kWalDeletion2,
+  kPartitionTableSnapshot,
+  // kPartitionTableEdits,
 };
 
 enum NewFileCustomTag : uint32_t {
@@ -89,6 +91,7 @@ enum NewFileCustomTag : uint32_t {
   kMinTimestamp = 10,
   kMaxTimestamp = 11,
   kUniqueId = 12,
+  kPartitionId = 13,
 
   // If this bit for the custom tag is set, opening DB should fail if
   // we don't know this field.
@@ -557,7 +560,9 @@ class VersionEdit {
   size_t NumEntries() const {
     return new_files_.size() + deleted_files_.size() +
            blob_file_additions_.size() + blob_file_garbages_.size() +
-           wal_additions_.size() + !wal_deletion_.IsEmpty();
+           wal_additions_.size() + !wal_deletion_.IsEmpty() +
+           (partition_table_snapshot_ != nullptr) +
+           !partition_table_edits->GetEdits().empty();
   }
 
   void SetColumnFamily(uint32_t column_family_id) {
@@ -605,6 +610,13 @@ class VersionEdit {
   void SetFullHistoryTsLow(std::string full_history_ts_low) {
     assert(!full_history_ts_low.empty());
     full_history_ts_low_ = std::move(full_history_ts_low);
+  }
+  void SetPartitionTableSnapshot(std::shared_ptr<PartitionTable> pt) {
+    partition_table_snapshot_ = std::move(pt);
+  }
+  // 不为nullptr: 新开log或发生Edits写入
+  const std::shared_ptr<PartitionTable>& GetPartitionTableSnapshot() const {
+    return partition_table_snapshot_;
   }
 
   // return true on success.
@@ -675,9 +687,12 @@ class VersionEdit {
 
   std::string full_history_ts_low_;
 
+  std::shared_ptr<PartitionTable> partition_table_snapshot_;
+
   std::shared_ptr<PartitionTableEdits> partition_table_edits = std::make_shared<PartitionTableEdits>();
  public:
   PartitionTableEdits* GetPartitionTableEdits() const {
+    assert(partition_table_edits != nullptr);
     return partition_table_edits.get();
   }
   // void SetPartitionTableEdits(const std::shared_ptr<PartitionTable> pt) {

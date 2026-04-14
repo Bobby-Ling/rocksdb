@@ -9,7 +9,9 @@
 #include <string>
 #include <vector>
 
-#include "rocksdb/slice.h"
+#include "rocksdb/rocksdb_namespace.h"
+
+#include "ylt/struct_pack.hpp"
 
 namespace ROCKSDB_NAMESPACE {
 using PartitionID = int64_t;
@@ -35,11 +37,17 @@ class PartitionTable {
   struct Plan {
     enum class Type : uint8_t { kSplit, kMerge };
     explicit Plan(Type type) : type(type) {}
+    virtual ~Plan() = default;
+    virtual std::string DebugString() const = 0;
     Type type;
   };
 
   struct SplitPlan : Plan {
     SplitPlan() : Plan(Type::kSplit) {}
+    ~SplitPlan() override = default;
+    std::string DebugString() const override {
+      return "SplitPlan{pid=" + std::to_string(pid) + "}";
+    }
     PartitionID pid;
     // TODO(lcr) new_pid1 new_pid2
     PartitionID new_pid = kInvalidPartitionID;
@@ -47,18 +55,24 @@ class PartitionTable {
 
   struct MergePlan : Plan {
     MergePlan() : Plan(Type::kMerge) {}
+    ~MergePlan() override = default;
+    std::string DebugString() const override {
+      return "MergePlan{left_pid=" + std::to_string(left_pid) +
+             ", right_pid=" + std::to_string(right_pid) + "}";
+    }
     PartitionID left_pid;
     PartitionID right_pid;
   };
-  explicit PartitionTable(std::size_t max_partitions,
+  PartitionTable() = default;
+  PartitionTable(uint32_t max_partitions,
                           double split_grouth_threshold,
                           double merge_growth_threshold)
-      : kMaxPartitions(max_partitions),
-        kSplitGrowthThreshold(split_grouth_threshold),
-        kMergeGrowthThreshold(merge_growth_threshold) {}
+      : max_partitions_(max_partitions),
+        split_growth_threshold_(split_grouth_threshold),
+        merge_growth_threshold_(merge_growth_threshold) {}
   PartitionTable(const PartitionTable& other)
-      : PartitionTable(other.kMaxPartitions, other.kSplitGrowthThreshold,
-                       other.kMergeGrowthThreshold) {
+      : PartitionTable(other.max_partitions_, other.split_growth_threshold_,
+                       other.merge_growth_threshold_) {
     next_partition_id_ = other.next_partition_id_;
     partition_storage = other.partition_storage;
     // growth_rate_index = other.growth_rate_index;
@@ -81,6 +95,13 @@ class PartitionTable {
   PartitionTable(PartitionTable&&) noexcept = delete;
   PartitionTable& operator=(PartitionTable&&) noexcept = delete;
 
+  void SetOptions(uint32_t max_partitions, double split_grouth_threshold,
+                  double merge_growth_threshold) {
+    this->max_partitions_ = max_partitions;
+    this->split_growth_threshold_ = split_grouth_threshold;
+    this->merge_growth_threshold_ = merge_growth_threshold;
+  };
+
  private:
   // TODO: user comparator
   struct Comparator {
@@ -93,9 +114,9 @@ class PartitionTable {
     }
   };
 
-  const std::size_t kMaxPartitions;
-  const double kSplitGrowthThreshold;
-  const double kMergeGrowthThreshold;
+  uint32_t max_partitions_ = std::numeric_limits<uint32_t>::max();
+  double split_growth_threshold_ = std::numeric_limits<double>::max();
+  double merge_growth_threshold_ = std::numeric_limits<double>::max();
 
   using PartitionTableStorage =
       std::map<std::optional<std::string>, PartitionInfo, Comparator>;
@@ -106,6 +127,7 @@ class PartitionTable {
   PartitionID next_partition_id_ = 0;
 
  public:
+  YLT_REFL(PartitionTable, partition_storage, next_partition_id_);
   using Storage = PartitionTableStorage;
 
   bool IsInitialized() const { return !partition_storage.empty(); }
@@ -113,7 +135,7 @@ class PartitionTable {
   std::size_t NumPartitions() const { return partition_storage.size(); }
 
   // 一定存在
-  PartitionInfo FindPartition(const Slice& user_key) const;
+  PartitionInfo FindPartition(const std::string& user_key) const;
 
   std::vector<PartitionID> FindPartitionInRange(const std::optional<std::string>& left, const std::optional<std::string>& right) const;
 
@@ -173,10 +195,16 @@ class PartitionTable {
     return static_cast<double>(NeedCompaction());
   }
 
+  void EncodeTo(std::string* dst) const;
+  static bool DecodeFrom(const std::string_view& src,
+                           std::shared_ptr<PartitionTable> table);
+
   std::shared_ptr<PartitionTable> ApplyToNewTable(const PartitionTableEdits &edits) const;
 
  private:
   void RebuildIndex() {
+    growth_rate_index.clear();
+    pid_index.clear();
     for (auto it = partition_storage.begin(); it != partition_storage.end(); ++it) {
       growth_rate_index.emplace(it->second.growth_rate, it);
       pid_index.emplace(it->second.partition_id, it);

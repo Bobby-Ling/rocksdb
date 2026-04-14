@@ -184,6 +184,8 @@ class VersionEditHandler : public VersionEditHandlerBase {
   std::unordered_map<uint32_t, std::unordered_set<uint64_t>>
       cf_to_missing_files_;
   std::unordered_map<uint32_t, uint64_t> cf_to_missing_blob_files_high_;
+  std::unordered_map<uint32_t, std::shared_ptr<PartitionTable>>
+      cf_to_partition_table_;
   bool no_error_if_files_missing_;
   std::shared_ptr<IOTracer> io_tracer_;
   bool skip_load_table_files_;

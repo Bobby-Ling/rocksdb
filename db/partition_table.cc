@@ -39,10 +39,10 @@ void PartitionTable::EraseGrowthIndex(PartitionTableStorage::iterator pm_it) {
   }
 }
 
-PartitionInfo PartitionTable::FindPartition(const Slice& user_key) const {
+PartitionInfo PartitionTable::FindPartition(const std::string& user_key) const {
   assert(!partition_storage.empty());
 
-  auto it = partition_storage.upper_bound(user_key.ToString());
+  auto it = partition_storage.upper_bound(user_key);
   if (it == partition_storage.begin()) {
     return BuildPartitionInfo(it);
   }
@@ -204,8 +204,26 @@ std::string PartitionTable::DebugString() const {
   return oss.str();
 }
 
+void PartitionTable::EncodeTo(std::string* dst) const {
+  std::vector<char> buffer = struct_pack::serialize(*this);
+  *dst = std::string(buffer.begin(), buffer.end());
+}
+
+bool PartitionTable::DecodeFrom(const std::string_view& src,
+                                  std::shared_ptr<PartitionTable> table) {
+  auto decoded = struct_pack::deserialize<PartitionTable>(src);
+  if (!decoded.has_value()) {
+    return false;
+  }
+
+  decoded->RebuildIndex();
+  auto pt = decoded.value();
+  *table = pt;
+  return true;
+}
+
 std::optional<PartitionTable::SplitPlan> PartitionTable::GetSplitPlan() const {
-  if (partition_storage.size() >= kMaxPartitions || growth_rate_index.empty()) {
+  if (partition_storage.size() >= max_partitions_ || growth_rate_index.empty()) {
     return std::nullopt;
   }
   int64_t total = 0;
@@ -214,7 +232,7 @@ std::optional<PartitionTable::SplitPlan> PartitionTable::GetSplitPlan() const {
   if (avg <= 0) return std::nullopt;
 
   auto hi_it = growth_rate_index.rbegin();
-  if (static_cast<double>(hi_it->first) <= avg * kSplitGrowthThreshold) {
+  if (static_cast<double>(hi_it->first) <= avg * split_growth_threshold_) {
     return std::nullopt;
   }
   auto pm_it = hi_it->second;
@@ -266,7 +284,7 @@ std::optional<PartitionTable::MergePlan> PartitionTable::GetMergePlan() const {
   if (avg <= 0) return std::nullopt;
 
   auto lo_it = growth_rate_index.begin();
-  if (static_cast<double>(lo_it->first) >= avg * kMergeGrowthThreshold) {
+  if (static_cast<double>(lo_it->first) >= avg * merge_growth_threshold_) {
     return std::nullopt;
   }
 
@@ -330,10 +348,10 @@ PartitionTable::CompactionType PartitionTable::NeedCompaction() const {
   if (pt_avg > 0) {
     int64_t highest_rate = growth_rate_index.rbegin()->first;
     int64_t lowest_rate = growth_rate_index.begin()->first;
-    if (static_cast<double>(highest_rate) > pt_avg * kSplitGrowthThreshold) {
+    if (static_cast<double>(highest_rate) > pt_avg * split_growth_threshold_) {
       return CompactionType::kSplit;
     }
-    if (static_cast<double>(lowest_rate) < pt_avg * kMergeGrowthThreshold) {
+    if (static_cast<double>(lowest_rate) < pt_avg * merge_growth_threshold_) {
       return CompactionType::kMerge;
     }
   }

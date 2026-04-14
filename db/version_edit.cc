@@ -93,7 +93,7 @@ void VersionEdit::Clear() {
   is_in_atomic_group_ = false;
   remaining_entries_ = 0;
   full_history_ts_low_.clear();
-  partition_table_edits.reset();
+  partition_table_snapshot_.reset();
 }
 
 bool VersionEdit::EncodeTo(std::string* dst) const {
@@ -232,6 +232,14 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
     TEST_SYNC_POINT_CALLBACK("VersionEdit::EncodeTo:NewFile4:CustomizeFields",
                              dst);
 
+    // Encode partition_id if valid
+    if (f.partition_id != kInvalidPartitionID) {
+      PutVarint32(dst, NewFileCustomTag::kPartitionId);
+      std::string partition_id_str;
+      PutVarint64(&partition_id_str, static_cast<uint64_t>(f.partition_id));
+      PutLengthPrefixedSlice(dst, Slice(partition_id_str));
+    }
+
     PutVarint32(dst, NewFileCustomTag::kTerminate);
   }
 
@@ -282,6 +290,18 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
     PutVarint32(dst, kFullHistoryTsLow);
     PutLengthPrefixedSlice(dst, full_history_ts_low_);
   }
+  if (partition_table_snapshot_ != nullptr) {
+    PutVarint32(dst, kPartitionTableSnapshot);
+    std::string encoded;
+    partition_table_snapshot_->EncodeTo(&encoded);
+    PutLengthPrefixedSlice(dst, encoded);
+  }
+  // if (!partition_table_edits->GetEdits().empty()) {
+  //   PutVarint32(dst, kPartitionTableEdits);
+  //   std::string encoded;
+  //   partition_table_edits->EncodeTo(&encoded);
+  //   PutLengthPrefixedSlice(dst, encoded);
+  // }
   return true;
 }
 
@@ -395,6 +415,13 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
             f.unique_id = kNullUniqueId64x2;
             return "invalid unique id";
           }
+          break;
+        case kPartitionId:
+          uint64_t partition_id_val;
+          if (!GetVarint64(&field, &partition_id_val)) {
+            return "invalid partition id";
+          }
+          f.partition_id = static_cast<PartitionID>(partition_id_val);
           break;
         default:
           if ((custom_tag & kCustomTagNonSafeIgnoreMask) != 0) {
@@ -714,6 +741,35 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
         }
         break;
 
+      case kPartitionTableSnapshot: {
+        Slice encoded;
+        if (!GetLengthPrefixedSlice(&input, &encoded)) {
+          msg = "partition table snapshot";
+          break;
+        }
+        // 新的覆盖旧的
+        partition_table_snapshot_ = std::make_shared<PartitionTable>();
+        bool result = PartitionTable::DecodeFrom(encoded.ToStringView(), partition_table_snapshot_);
+        // 外面需要SetOptions
+        if (!result) {
+          return Status::Corruption("PartitionTable decode failed");;
+        }
+        break;
+      }
+
+      // case kPartitionTableEdits: {
+      //   Slice encoded;
+      //   if (!GetLengthPrefixedSlice(&input, &encoded)) {
+      //     msg = "partition table edits";
+      //     break;
+      //   }
+      //   Status s = partition_table_edits->DecodeFrom(encoded);
+      //   if (!s.ok()) {
+      //     return s;
+      //   }
+      //   break;
+      // }
+
       default:
         if (tag & kTagSafeIgnoreMask) {
           // Tag from future which can be safely ignored.
@@ -869,6 +925,10 @@ std::string VersionEdit::DebugString(bool hex_key) const {
   if (HasFullHistoryTsLow()) {
     r.append("\n FullHistoryTsLow: ");
     r.append(Slice(full_history_ts_low_).ToString(hex_key));
+  }
+  if (partition_table_snapshot_ != nullptr) {
+    r.append("\n  PartitionTableSnapshot: ");
+    r.append(partition_table_snapshot_->DebugString());
   }
   r.append("\n}\n");
   return r;
