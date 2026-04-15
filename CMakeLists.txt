@@ -208,7 +208,7 @@ int main() {
       add_definitions(-DROCKSDB_BACKTRACE)
       if(ROCKSDB_BACKTRACE_USE_CPPTRACE)
         add_definitions(-DROCKSDB_BACKTRACE_USE_CPPTRACE)
-        include(cpptrace.cmake)
+        include(third-party/cpptrace.cmake)
         list(APPEND THIRDPARTY_LIBS cpptrace::cpptrace)
       endif()
     else()
