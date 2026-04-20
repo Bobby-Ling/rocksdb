@@ -147,6 +147,7 @@ IF_ROCKSDB_LITE("",
     "readwhilemerging,"
     "readwhilescanning,"
     "readrandomwriterandom,"
+    "deltabench,"
     "updaterandom,"
     "xorupdaterandom,"
     "approximatesizerandom,"
@@ -199,6 +200,9 @@ IF_ROCKSDB_LITE("",
     "N threads doing random reads\n"
     "\treadrandomwriterandom -- N threads doing random-read, "
     "random-write\n"
+    "\tdeltabench -- N threads doing random-read/random-write over the "
+    "whole row_id space, plus 1 dedicated thread issuing rowset range "
+    "deletes\n"
     "\tupdaterandom  -- N threads doing read-modify-write for random "
     "keys\n"
     "\txorupdaterandom  -- N threads doing read-XOR-write for "
@@ -572,6 +576,17 @@ DEFINE_double(delta_partition_merge_growth_threshold, 0.5,
 DEFINE_uint64(delta_partition_target_file_size, 64 * 1048576,
               "Delta compaction: Target bytes per SST file within a partition "
               "(0 = no limit).");
+
+DEFINE_int64(delta_bench_rowset_num, 16,
+             "Delta benchmark: Number of equal-sized rowsets spanning the "
+             "full row_id space.");
+
+DEFINE_int32(delta_bench_rowset_trigger_percent, 80,
+             "Delta benchmark: Trigger a rowset range delete after this "
+             "percentage of rowset writes has accumulated.");
+
+DEFINE_int64(delta_bench_delta_merge_count, 100,
+             "Delta benchmark: Stop after this many rowset range deletes.");
 
 DEFINE_int64(cache_size, 8 << 20,  // 8MB
              "Number of bytes to use as a cache of uncompressed data");
@@ -2790,12 +2805,76 @@ class Benchmark {
 
   std::unique_ptr<TimestampEmulator> mock_app_clock_;
 
+  struct DeltaBenchState {
+    int64_t rowset_num = 0;
+    int64_t rowset_size = 0;
+    uint64_t rowset_trigger_writes = 0;
+    int64_t target_merge_count = 0;
+    std::unique_ptr<std::atomic<uint64_t>[]> rowset_write_counts;
+    std::atomic<int64_t> merges_done{0};
+  };
+
+  std::unique_ptr<DeltaBenchState> delta_bench_state_;
+
   bool SanityCheck() {
     if (FLAGS_compression_ratio > 1) {
       fprintf(stderr, "compression_ratio should be between 0 and 1\n");
       return false;
     }
     return true;
+  }
+
+  void InitializeDeltaBenchState() {
+    if (FLAGS_num <= 0) {
+      fprintf(stderr, "deltabench requires --num > 0\n");
+      ErrorExit();
+    }
+    if (FLAGS_delta_bench_rowset_num <= 0) {
+      fprintf(stderr, "deltabench requires --delta_bench_rowset_num > 0\n");
+      ErrorExit();
+    }
+    if (FLAGS_delta_bench_rowset_trigger_percent <= 0 ||
+        FLAGS_delta_bench_rowset_trigger_percent > 100) {
+      fprintf(stderr,
+              "deltabench requires 0 < --delta_bench_rowset_trigger_percent <= "
+              "100\n");
+      ErrorExit();
+    }
+    if (FLAGS_delta_bench_delta_merge_count <= 0) {
+      fprintf(stderr,
+              "deltabench requires --delta_bench_delta_merge_count > 0\n");
+      ErrorExit();
+    }
+    if (FLAGS_num_multi_db > 0) {
+      fprintf(stderr, "deltabench does not support --num_multi_db\n");
+      ErrorExit();
+    }
+
+    delta_bench_state_.reset(new DeltaBenchState());
+    delta_bench_state_->rowset_num = FLAGS_delta_bench_rowset_num;
+    delta_bench_state_->rowset_size =
+        (FLAGS_num + FLAGS_delta_bench_rowset_num - 1) /
+        FLAGS_delta_bench_rowset_num;
+    delta_bench_state_->rowset_trigger_writes = static_cast<uint64_t>(
+        std::max<int64_t>(1, (delta_bench_state_->rowset_size *
+                                  FLAGS_delta_bench_rowset_trigger_percent +
+                              99) /
+                                 100));
+    delta_bench_state_->target_merge_count =
+        FLAGS_delta_bench_delta_merge_count;
+    delta_bench_state_->rowset_write_counts.reset(
+        new std::atomic<uint64_t>[FLAGS_delta_bench_rowset_num]);
+    for (int64_t i = 0; i < FLAGS_delta_bench_rowset_num; ++i) {
+      delta_bench_state_->rowset_write_counts[i].store(
+          0, std::memory_order_relaxed);
+    }
+    delta_bench_state_->merges_done.store(0, std::memory_order_relaxed);
+  }
+
+  bool DeltaBenchFinished() const {
+    return delta_bench_state_ != nullptr &&
+           delta_bench_state_->merges_done.load(std::memory_order_relaxed) >=
+               delta_bench_state_->target_merge_count;
   }
 
   inline bool CompressSlice(const CompressionInfo& compression_info,
@@ -3341,7 +3420,8 @@ class Benchmark {
   }
 
   void ErrorExit() {
-    DeleteDBs();
+    fflush(stdout);
+    fflush(stderr);
     exit(1);
   }
 
@@ -3545,6 +3625,13 @@ class Benchmark {
         method = &Benchmark::ReadWhileScanning;
       } else if (name == "readrandomwriterandom") {
         method = &Benchmark::ReadRandomWriteRandom;
+      } else if (name == "deltabench") {
+        if (num_threads < 1) {
+          fprintf(stderr, "deltabench requires --threads >= 1\n");
+          ErrorExit();
+        }
+        num_threads++;  // Add extra thread for rowset range deletes
+        method = &Benchmark::DeltaBench;
       } else if (name == "readrandommergerandom") {
         if (FLAGS_merge_operator.empty()) {
           fprintf(stdout, "%-12s : skipped (--merge_operator is unknown)\n",
@@ -3772,6 +3859,9 @@ class Benchmark {
         }
 
         for (int i = 0; i < num_warmup; i++) {
+          if (name == "deltabench") {
+            InitializeDeltaBenchState();
+          }
           RunBenchmark(num_threads, name, method);
         }
 
@@ -3781,6 +3871,9 @@ class Benchmark {
 
         CombinedStats combined_stats;
         for (int i = 0; i < num_repeat; i++) {
+          if (name == "deltabench") {
+            InitializeDeltaBenchState();
+          }
           Stats stats = RunBenchmark(num_threads, name, method);
           combined_stats.AddStats(stats);
           if (FLAGS_confidence_interval_only) {
@@ -3788,6 +3881,9 @@ class Benchmark {
           } else {
             combined_stats.Report(name);
           }
+        }
+        if (name == "deltabench") {
+          delta_bench_state_.reset();
         }
         if (num_repeat > 1) {
           combined_stats.ReportFinal(name);
@@ -6918,6 +7014,78 @@ class Benchmark {
     }
   }
 
+  void DeltaBench(ThreadState* thread) {
+    if (thread->tid > 0) {
+      ReadOptions options = read_options_;
+      RandomGenerator gen;
+      std::string value;
+      int64_t found = 0;
+      int64_t reads_done = 0;
+      int64_t writes_done = 0;
+
+      std::unique_ptr<const char[]> key_guard;
+      Slice key = AllocateKey(&key_guard);
+
+      std::unique_ptr<char[]> ts_guard;
+      if (user_timestamp_size_ > 0) {
+        ts_guard.reset(new char[user_timestamp_size_]);
+      }
+
+      while (!DeltaBenchFinished()) {
+        DB* db = SelectDB(thread);
+        uint64_t key_id = thread->rand.Next() % FLAGS_num;
+        GenerateKeyFromInt(key_id, FLAGS_num, &key);
+
+        // Randomly decide whether to do a read or write operation
+        // based on FLAGS_readwritepercent
+        if (thread->rand.Next() % 100 < static_cast<unsigned int>(FLAGS_readwritepercent)) {
+          Slice ts;
+          if (user_timestamp_size_ > 0) {
+            ts = mock_app_clock_->GetTimestampForRead(thread->rand,
+                                                      ts_guard.get());
+            options.timestamp = &ts;
+          }
+          Status s = db->Get(options, key, &value);
+          if (!s.ok() && !s.IsNotFound()) {
+            fprintf(stderr, "get error: %s\n", s.ToString().c_str());
+          } else if (!s.IsNotFound()) {
+            found++;
+          }
+          reads_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        } else {
+          Status s;
+          if (user_timestamp_size_ > 0) {
+            Slice ts = mock_app_clock_->Allocate(ts_guard.get());
+            s = db->Put(write_options_, key, ts, gen.Generate());
+          } else {
+            s = db->Put(write_options_, key, gen.Generate());
+          }
+          if (!s.ok()) {
+            fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+            ErrorExit();
+          }
+          uint64_t rowset_id = std::min<uint64_t>(
+              static_cast<uint64_t>(key_id / delta_bench_state_->rowset_size),
+              static_cast<uint64_t>(delta_bench_state_->rowset_num - 1));
+          delta_bench_state_->rowset_write_counts[rowset_id].fetch_add(
+              1, std::memory_order_relaxed);
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+      char msg[128];
+      snprintf(msg, sizeof(msg),
+               "( reads:%" PRIu64 " writes:%" PRIu64 " found:%" PRIu64
+               " merges:%" PRIu64 " )",
+               reads_done, writes_done, found,
+               delta_bench_state_->merges_done.load(std::memory_order_relaxed));
+      thread->stats.AddMessage(msg);
+    } else {
+      BGDeltaBenchMerger(thread);
+    }
+  }
+
   void BGWriter(ThreadState* thread, enum OperationType write_merge) {
     // Special thread that keeps writing until other threads are done.
     RandomGenerator gen;
@@ -7051,6 +7219,65 @@ class Benchmark {
                 << std::endl;
     }
     thread->stats.AddBytes(bytes);
+  }
+
+  void BGDeltaBenchMerger(ThreadState* thread) {
+    thread->stats.SetExcludeFromMerge();
+
+    std::unique_ptr<const char[]> begin_key_guard;
+    Slice begin_key = AllocateKey(&begin_key_guard);
+    std::unique_ptr<const char[]> end_key_guard;
+    Slice end_key = AllocateKey(&end_key_guard);
+
+    uint64_t local_merges = 0;
+    while (!DeltaBenchFinished()) {
+      DB* db = SelectDB(thread);
+      bool merged = false;
+      for (int64_t rowset_id = 0;
+           rowset_id < delta_bench_state_->rowset_num && !DeltaBenchFinished();
+           ++rowset_id) {
+        uint64_t write_count =
+            delta_bench_state_->rowset_write_counts[rowset_id].load(
+                std::memory_order_relaxed);
+        if (write_count < delta_bench_state_->rowset_trigger_writes) {
+          continue;
+        }
+        write_count = delta_bench_state_->rowset_write_counts[rowset_id].exchange(
+            0, std::memory_order_relaxed);
+        if (write_count < delta_bench_state_->rowset_trigger_writes) {
+          continue;
+        }
+
+        uint64_t begin_num =
+            static_cast<uint64_t>(rowset_id * delta_bench_state_->rowset_size);
+        uint64_t end_num = static_cast<uint64_t>(std::min<int64_t>(
+            FLAGS_num, (rowset_id + 1) * delta_bench_state_->rowset_size));
+        GenerateKeyFromInt(begin_num, FLAGS_num, &begin_key);
+        GenerateKeyFromInt(end_num, FLAGS_num, &end_key);
+        Status s = db->DeleteRange(write_options_, db->DefaultColumnFamily(),
+                                   begin_key, end_key);
+        if (!s.ok()) {
+          fprintf(stderr, "deleterange error: %s\n", s.ToString().c_str());
+          ErrorExit();
+        }
+        delta_bench_state_->merges_done.fetch_add(1,
+                                                  std::memory_order_relaxed);
+        local_merges++;
+        thread->stats.FinishedOps(nullptr, db, 1, kDelete);
+        merged = true;
+        break;
+      }
+      if (!merged) {
+        FLAGS_env->SleepForMicroseconds(1000);
+      }
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "( rowset_merges:%" PRIu64 " target:%" PRIu64 " )",
+             local_merges,
+             delta_bench_state_->merges_done.load(std::memory_order_relaxed));
+    thread->stats.AddMessage(msg);
   }
 
   void ReadWhileScanning(ThreadState* thread) {

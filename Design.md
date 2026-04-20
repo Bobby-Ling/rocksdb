@@ -4,14 +4,23 @@
 > GaussDB(DWS)、AnalyticDB、Singlestore、Unistore(snowflake)
 在HTAP实时入库和查询场景下, 在行式实时入库到转换为列式存储中间添加一个行式增量存储, 用于支持实时查询. 
 GaussDB(DWS)等主键模型HTAP数据库使用RocksDB作为行式存储(Delta Table)的存储引擎, 其特征呈现如下: 入库时, 一定时间内对于某Key范围进行Put(行式入库), 随后触发Merge, 顺序Scan然后Delete所有行; 此外, 同时也通过Primary Index支持实时Get查询. 
-Delta Table是类似缓冲区的存在, 其数据量是有限的, 采用RocksDB的话会面临大量删除墓碑的GC问题, 带来大量不必要的数据下沉和Compaction开销. 为了优化: 
-1. 仅留下L0层(语义是, 这些KV没有新旧之分, 因此不需要通过Level区分新旧); 
+Delta Table是类似缓冲区的存在, 其数据量是有限的, 且每个Key最终都会被删除, 采用RocksDB的话会面临大量删除墓碑的GC问题, 带来大量不必要的数据下沉和Compaction开销. 为了优化: 
+1. 仅留下L0层(语义是, 这些KV没有新旧之分, 因此不需要通过Level区分新旧), 且最终都会被删除, 不能下沉. 
 2. 此时L0层会存在大量重叠的SST, 查询性能差, 因此对L0进行分区, 且需要是动态分区(目标是分区间大小均匀). 
 3. 需要有墓碑GC机制, 在分区边界变化时进行Compaction同时进行GC.
 
 ### 目标负载
 
-不同分布的读写混合
+不同分布的读写混合, 每个Key最终都会被删除
+
+key是row_id, key是随机读写混合, 在整个row_id范围内, 等大小划分区间, 区间内row_id达到一定程度就会作为转为列存, 并在此行存表中删除. 
+参数如下: 
+1. num 作为整个row_id空间 
+2. delta_bench_rowset_num 区间数目, 每个区间的row达到一定比例之后就会转为列存(即执行范围删除)
+3. delta_bench_delta_merge_count 指定时达到指定次数转列存操作(delta Merge, 范围删除)才停止
+
+row_id作为Key, 随机读写; 将其分N个区, 每个分区内达到一定比例后执行Merge, 即删除该分区的Key. 
+在db_bench中添加一个新的负载函数
 
 ### RocksDB相关功能
 
