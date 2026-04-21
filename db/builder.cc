@@ -15,6 +15,7 @@
 
 #include "db/blob/blob_file_builder.h"
 #include "db/compaction/compaction_iterator.h"
+#include "db/dbformat.h"
 #include "db/event_helpers.h"
 #include "db/internal_stats.h"
 #include "db/merge_helper.h"
@@ -72,7 +73,9 @@ Status BuildTable(
     TableProperties* table_properties, Env::WriteLifeTimeHint write_hint,
     const std::string* full_history_ts_low,
     BlobFileCompletionCallback* blob_callback, uint64_t* num_input_entries,
-    uint64_t* memtable_payload_bytes, uint64_t* memtable_garbage_bytes) {
+    uint64_t* memtable_payload_bytes, uint64_t* memtable_garbage_bytes,
+    const InternalKey* smallest, const InternalKey* largest,
+    uint64_t* num_point_input_entries) {
   assert((tboptions.column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          tboptions.column_family_name.empty());
@@ -88,6 +91,7 @@ Status BuildTable(
   Status s;
   meta->fd.file_size = 0;
   iter->SeekToFirst();
+  std::list<std::unique_ptr<InternalKey>> range_del_key_boundaries;
   std::unique_ptr<CompactionRangeDelAggregator> range_del_agg(
       new CompactionRangeDelAggregator(&tboptions.internal_comparator,
                                        snapshots));
@@ -98,7 +102,22 @@ Status BuildTable(
         range_del_iter->num_unfragmented_tombstones();
     total_tombstone_payload_bytes +=
         range_del_iter->total_tombstone_payload_bytes();
-    range_del_agg->AddTombstones(std::move(range_del_iter));
+    const InternalKey* range_del_smallest = nullptr;
+    const InternalKey* range_del_largest = nullptr;
+    range_del_key_boundaries.push_back(
+        smallest
+            ? std::unique_ptr<InternalKey>(new InternalKey(
+                  smallest->user_key(), kMaxSequenceNumber, kTypeRangeDeletion))
+            : nullptr);
+    range_del_smallest = range_del_key_boundaries.back().get();
+    range_del_key_boundaries.push_back(
+        largest
+            ? std::unique_ptr<InternalKey>(new InternalKey(
+                  largest->user_key(), kMaxSequenceNumber, kTypeRangeDeletion))
+            : nullptr);
+    range_del_largest = range_del_key_boundaries.back().get();
+    range_del_agg->AddTombstones(std::move(range_del_iter), range_del_smallest,
+                                 range_del_largest);
   }
 
   std::string fname = TableFileName(ioptions.cf_paths, meta->fd.GetNumber(),
@@ -257,6 +276,9 @@ Status BuildTable(
     if (num_input_entries != nullptr) {
       *num_input_entries =
           c_iter.num_input_entry_scanned() + num_unfragmented_tombstones;
+    }
+    if (num_point_input_entries != nullptr) {
+      *num_point_input_entries = c_iter.num_input_entry_scanned();
     }
     if (!s.ok() || empty) {
       builder->Abandon();

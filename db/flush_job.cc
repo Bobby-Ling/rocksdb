@@ -861,6 +861,7 @@ Status FlushJob::WriteLevel0Table() {
     ro.total_order_seek = true;
     Arena arena;
     uint64_t total_num_entries = 0, total_num_deletes = 0;
+    uint64_t total_num_range_del_entries = 0;
     uint64_t total_data_size = 0;
     size_t total_memory_usage = 0;
     // Used for testing:
@@ -879,6 +880,8 @@ Status FlushJob::WriteLevel0Table() {
       auto* range_del_iter = m->NewRangeTombstoneIterator(
           ro, kMaxSequenceNumber, true /* immutable_memtable */);
       if (range_del_iter != nullptr) {
+        total_num_range_del_entries +=
+            range_del_iter->num_unfragmented_tombstones();
         range_del_iters.emplace_back(range_del_iter);
       }
       total_num_entries += m->num_entries();
@@ -941,6 +944,7 @@ Status FlushJob::WriteLevel0Table() {
           (full_history_ts_low_.empty()) ? nullptr : &full_history_ts_low_;
       const SequenceNumber job_snapshot_seq =
           job_context_->GetJobSnapshotSequence();
+      uint64_t num_point_entries = 0;
 
       if (is_delta) {
         const auto& delta_opts = mutable_cf_options_.compaction_options_delta;
@@ -1040,6 +1044,7 @@ Status FlushJob::WriteLevel0Table() {
 
           std::vector<BlobFileAddition> part_blobs;
           uint64_t part_entries = 0;
+          uint64_t part_point_entries = 0;
           IOStatus part_io_s;
 
           TableBuilderOptions part_tbo(
@@ -1063,11 +1068,13 @@ Status FlushJob::WriteLevel0Table() {
               event_logger_, job_context_->job_id, io_priority,
               &table_properties_, write_hint, full_history_ts_low,
               blob_callback_, &part_entries, &memtable_payload_bytes,
-              &memtable_garbage_bytes);
+              &memtable_garbage_bytes, lb_ptr ? &lb_ikey : nullptr,
+              ub_ptr ? &ub_ikey : nullptr, &part_point_entries);
           assert(!s.ok() || part_io_s.ok());
           part_io_s.PermitUncheckedError();
 
           num_input_entries += part_entries;
+          num_point_entries += part_point_entries;
           if (s.ok()) {
             pt_edits->UpdatePartitionKeyCount(partition.partition_id,
                                                static_cast<size_t>(part_entries));
@@ -1102,13 +1109,24 @@ Status FlushJob::WriteLevel0Table() {
         io_s.PermitUncheckedError();
       }
 
-      if (num_input_entries != total_num_entries && s.ok()) {
-        std::string msg = "Expected " + std::to_string(total_num_entries) +
-                          " entries in memtables, but read " +
-                          std::to_string(num_input_entries);
-        ROCKS_LOG_WARN(db_options_.info_log, "[%s] [JOB %d] Level-0 flush %s",
-                       cfd_->GetName().c_str(), job_context_->job_id,
-                       msg.c_str());
+      uint64_t expected_entries = total_num_entries;
+      uint64_t actual_entries = num_input_entries;
+      if (is_delta) {
+        // Range tombstones can be duplicated across partitioned output files
+        // after clipping, so only point entries are expected to be conserved
+        // across the delta flush path.
+        expected_entries -= total_num_range_del_entries;
+        actual_entries = num_point_entries;
+      }
+      if (actual_entries != expected_entries && s.ok()) {
+        std::string msg = "Expected " + std::to_string(expected_entries) +
+                          (is_delta ? " point entries" : " entries") +
+                          " in memtables, but read " +
+                          std::to_string(actual_entries);
+        ROCKS_LOG_WARN(db_options_.info_log,
+                        "[%s] [JOB %d] Level-0 flush %s",
+                        cfd_->GetName().c_str(), job_context_->job_id,
+                        msg.c_str());
         if (db_options_.flush_verify_memtable_count) {
           s = Status::Corruption(msg);
         }
