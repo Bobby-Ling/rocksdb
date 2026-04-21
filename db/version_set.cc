@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cinttypes>
+#include <cstddef>
 #include <cstdio>
 #include <list>
 #include <map>
@@ -1918,6 +1919,7 @@ VersionStorageInfo::VersionStorageInfo(
     compact_cursor_.resize(num_levels_);
     partition_table_ = ref_vstorage->partition_table_;
   }
+  view_for_none_delta_ = std::make_unique<VersionStorageInfoView>(this);
 }
 
 Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
@@ -3892,7 +3894,7 @@ bool Version::Unref() {
 
 bool VersionStorageInfo::OverlapInLevel(int level,
                                         const Slice* smallest_user_key,
-                                        const Slice* largest_user_key) {
+                                        const Slice* largest_user_key) const {
   if (level >= num_non_empty_levels_) {
     // empty level, no overlap
     return false;
@@ -3902,15 +3904,25 @@ bool VersionStorageInfo::OverlapInLevel(int level,
                                largest_user_key);
 }
 
-// Store in "*inputs" all files in "level" that overlap [begin,end]
-// If hint_index is specified, then it points to a file in the
-// overlapping range.
-// The file_index returns a pointer to any file in an overlapping range.
 void VersionStorageInfo::GetOverlappingInputs(
     int level, const InternalKey* begin, const InternalKey* end,
     std::vector<FileMetaData*>* inputs, int hint_index, int* file_index,
     bool expand_range, InternalKey** next_smallest) const {
-  if (level >= num_non_empty_levels_) {
+  assert(compaction_style_ != kCompactionStyleDelta);
+  return view_for_none_delta_->GetOverlappingInputs(
+      level, begin, end, inputs, hint_index, file_index, expand_range,
+      next_smallest);
+}
+
+// Store in "*inputs" all files in "level" that overlap [begin,end]
+// If hint_index is specified, then it points to a file in the
+// overlapping range.
+// The file_index returns a pointer to any file in an overlapping range.
+void VersionStorageInfoView::GetOverlappingInputs(
+    int level, const InternalKey* begin, const InternalKey* end,
+    std::vector<FileMetaData*>* inputs, int hint_index, int* file_index,
+    bool expand_range, InternalKey** next_smallest) const {
+  if (level >= num_non_empty_levels()) {
     // this level is empty, no overlapping inputs
     return;
   }
@@ -3919,7 +3931,7 @@ void VersionStorageInfo::GetOverlappingInputs(
   if (file_index) {
     *file_index = -1;
   }
-  const Comparator* user_cmp = user_comparator_;
+  const Comparator* user_cmp = InternalComparator()->user_comparator();
   if (level > 0) {
     GetOverlappingInputsRangeBinarySearch(level, begin, end, inputs, hint_index,
                                           file_index, false, next_smallest);
@@ -3942,15 +3954,17 @@ void VersionStorageInfo::GetOverlappingInputs(
 
   // index stores the file index need to check.
   std::list<size_t> index;
-  for (size_t i = 0; i < level_files_brief_[level].num_files; i++) {
+  for (size_t i = 0; i < NumLevelFiles(level); i++) {
     index.emplace_back(i);
   }
 
+  auto &level_files_brief_ = LevelFilesBrief(level);
+  auto &level_files = LevelFiles(level);
   while (!index.empty()) {
     bool found_overlapping_file = false;
     auto iter = index.begin();
     while (iter != index.end()) {
-      FdWithKeyRange* f = &(level_files_brief_[level].files[*iter]);
+      FdWithKeyRange* f = &(level_files_brief_.files[*iter]);
       const Slice file_start = ExtractUserKey(f->smallest_key);
       const Slice file_limit = ExtractUserKey(f->largest_key);
       if (begin != nullptr &&
@@ -3963,7 +3977,7 @@ void VersionStorageInfo::GetOverlappingInputs(
         iter++;
       } else {
         // if overlap
-        inputs->emplace_back(files_[level][*iter]);
+        inputs->emplace_back(level_files[*iter]);
         found_overlapping_file = true;
         // record the first file index.
         if (file_index && *file_index == -1) {
@@ -3990,21 +4004,29 @@ void VersionStorageInfo::GetOverlappingInputs(
   }
 }
 
+void VersionStorageInfo::GetCleanInputsWithinInterval(
+    int level, const InternalKey* begin, const InternalKey* end,
+    std::vector<FileMetaData*>* inputs, int hint_index, int* file_index) const {
+  assert(compaction_style_ != kCompactionStyleDelta);
+  return view_for_none_delta_->GetCleanInputsWithinInterval(
+      level, begin, end, inputs, hint_index, file_index);
+}
+
 // Store in "*inputs" files in "level" that within range [begin,end]
 // Guarantee a "clean cut" boundary between the files in inputs
 // and the surrounding files and the maxinum number of files.
 // This will ensure that no parts of a key are lost during compaction.
 // If hint_index is specified, then it points to a file in the range.
 // The file_index returns a pointer to any file in an overlapping range.
-void VersionStorageInfo::GetCleanInputsWithinInterval(
+void VersionStorageInfoView::GetCleanInputsWithinInterval(
     int level, const InternalKey* begin, const InternalKey* end,
     std::vector<FileMetaData*>* inputs, int hint_index, int* file_index) const {
   inputs->clear();
   if (file_index) {
     *file_index = -1;
   }
-  if (level >= num_non_empty_levels_ || level == 0 ||
-      level_files_brief_[level].num_files == 0) {
+  if (level >= num_non_empty_levels() || level == 0 ||
+      NumLevelFiles(level) == 0) {
     // this level is empty, no inputs within range
     // also don't support clean input interval within L0
     return;
@@ -4015,6 +4037,15 @@ void VersionStorageInfo::GetCleanInputsWithinInterval(
                                         true /* within_interval */);
 }
 
+void VersionStorageInfo::GetOverlappingInputsRangeBinarySearch(
+    int level, const InternalKey* begin, const InternalKey* end,
+    std::vector<FileMetaData*>* inputs, int hint_index, int* file_index,
+    bool within_interval, InternalKey** next_smallest) const {
+  assert(compaction_style_ != kCompactionStyleDelta);
+  return view_for_none_delta_->GetOverlappingInputsRangeBinarySearch(
+      level, begin, end, inputs, hint_index, file_index, within_interval,
+      next_smallest);
+}
 // Store in "*inputs" all files in "level" that overlap [begin,end]
 // Employ binary search to find at least one file that overlaps the
 // specified range. From that file, iterate backwards and
@@ -4022,15 +4053,17 @@ void VersionStorageInfo::GetCleanInputsWithinInterval(
 // if within_range is set, then only store the maximum clean inputs
 // within range [begin, end]. "clean" means there is a boundary
 // between the files in "*inputs" and the surrounding files
-void VersionStorageInfo::GetOverlappingInputsRangeBinarySearch(
+void VersionStorageInfoView::GetOverlappingInputsRangeBinarySearch(
     int level, const InternalKey* begin, const InternalKey* end,
     std::vector<FileMetaData*>* inputs, int hint_index, int* file_index,
     bool within_interval, InternalKey** next_smallest) const {
   assert(level > 0);
 
-  auto user_cmp = user_comparator_;
-  const FdWithKeyRange* files = level_files_brief_[level].files;
-  const int num_files = static_cast<int>(level_files_brief_[level].num_files);
+  auto user_cmp = InternalComparator()->user_comparator();
+  auto &level_files_brief_ = LevelFilesBrief(level);
+  auto &level_files = LevelFiles(level);
+  const FdWithKeyRange* files = level_files_brief_.files;
+  const int num_files = static_cast<int>(level_files_brief_.num_files);
 
   // begin to use binary search to find lower bound
   // and upper bound.
@@ -4109,13 +4142,13 @@ void VersionStorageInfo::GetOverlappingInputsRangeBinarySearch(
 
   // insert overlapping files into vector
   for (int i = start_index; i < end_index; i++) {
-    inputs->push_back(files_[level][i]);
+    inputs->push_back(level_files[i]);
   }
 
   if (next_smallest != nullptr) {
     // Provide the next key outside the range covered by inputs
-    if (end_index < static_cast<int>(files_[level].size())) {
-      **next_smallest = files_[level][end_index]->smallest;
+    if (end_index < static_cast<int>(level_files.size())) {
+      **next_smallest = level_files[end_index]->smallest;
     } else {
       *next_smallest = nullptr;
     }
@@ -4378,8 +4411,8 @@ uint64_t VersionStorageInfo::EstimateLiveDataSize() const {
 }
 
 bool VersionStorageInfo::RangeMightExistAfterSortedRun(
-    const Slice& smallest_user_key, const Slice& largest_user_key,
-    int last_level, int last_l0_idx) {
+  const Slice& smallest_user_key, const Slice& largest_user_key,
+  int last_level, int last_l0_idx) const {
   assert((last_l0_idx != -1) == (last_level == 0));
   // TODO(ajkr): this preserves earlier behavior where we considered an L0 file
   // bottommost only if it's the oldest L0 file and there are no files on older

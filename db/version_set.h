@@ -83,6 +83,7 @@ class MergeIteratorBuilder;
 class SystemClock;
 class ManifestTailer;
 class FilePickerMultiGet;
+class VersionStorageInfoView;
 
 // VersionEdit is always supposed to be valid and it is used to point at
 // entries in Manifest. Ideally it should not be used as a container to
@@ -284,7 +285,7 @@ class VersionStorageInfo {
   // smallest_user_key==NULL represents a key smaller than all keys in the DB.
   // largest_user_key==NULL represents a key largest than all keys in the DB.
   bool OverlapInLevel(int level, const Slice* smallest_user_key,
-                      const Slice* largest_user_key);
+                      const Slice* largest_user_key) const;
 
   // Returns true iff the first or last file in inputs contains
   // an overlapping user key to the file "just outside" of it (i.e.
@@ -427,6 +428,11 @@ class VersionStorageInfo {
   const ROCKSDB_NAMESPACE::LevelFilesBrief& LevelFilesBrief(int level) const {
     assert(level < static_cast<int>(level_files_brief_.size()));
     return level_files_brief_[level];
+  }
+
+  const autovector<ROCKSDB_NAMESPACE::LevelFilesBrief>& LevelFilesBriefs()
+      const {
+    return level_files_brief_;
   }
 
   // REQUIRES: PrepareForVersionAppend has been called
@@ -583,7 +589,8 @@ class VersionStorageInfo {
   //    check for overlap; otherwise, must be -1
   bool RangeMightExistAfterSortedRun(const Slice& smallest_user_key,
                                      const Slice& largest_user_key,
-                                     int last_level, int last_l0_idx);
+                                     int last_level,
+                                     int last_l0_idx) const;
 
   // Version构造之后不为nullptr
   const std::shared_ptr<PartitionTable> GetPartitionTable() const {
@@ -743,8 +750,175 @@ class VersionStorageInfo {
   // is compiled in release mode
   bool force_consistency_checks_;
 
+  std::unique_ptr<VersionStorageInfoView> view_for_none_delta_;
+
   friend class Version;
   friend class VersionSet;
+};
+
+using MarkedFiles = autovector<std::pair<int, FileMetaData*>>;
+class VersionStorageInfoView {
+ public:
+
+  explicit VersionStorageInfoView(const VersionStorageInfo* vstorage)
+      : vstorage_(vstorage) {}
+  virtual ~VersionStorageInfoView() = default;
+
+  virtual int num_levels() const { return vstorage_->num_levels(); }
+
+  virtual int num_non_empty_levels() const {
+    return vstorage_->num_non_empty_levels();
+  }
+
+  virtual size_t NumLevelFiles(int level) const {
+    return vstorage_->NumLevelFiles(level);
+  }
+
+  virtual const std::vector<FileMetaData*>& LevelFiles(int level) const {
+    return vstorage_->LevelFiles(level);
+  }
+
+  virtual const LevelFilesBrief& LevelFilesBrief(int level) const {
+    return vstorage_->LevelFilesBrief(level);
+  }
+
+  virtual const autovector<ROCKSDB_NAMESPACE::LevelFilesBrief>&
+  LevelFilesBriefs() const {
+    return vstorage_->LevelFilesBriefs();
+  }
+
+  virtual double CompactionScore(int idx) const {
+    return vstorage_->CompactionScore(idx);
+  }
+
+  virtual const MarkedFiles& FilesMarkedForCompaction() const {
+    return vstorage_->FilesMarkedForCompaction();
+  }
+
+  virtual const MarkedFiles& FilesMarkedForPeriodicCompaction() const {
+    return vstorage_->FilesMarkedForPeriodicCompaction();
+  }
+
+  virtual int base_level() const { return vstorage_->base_level(); }
+
+  virtual bool level0_non_overlapping() const {
+    return vstorage_->level0_non_overlapping();
+  }
+
+  virtual void GetOverlappingInputs(
+      int level, const InternalKey* begin, const InternalKey* end,
+      std::vector<FileMetaData*>* inputs, int hint_index = -1,
+      int* file_index = nullptr, bool expand_range = true,
+      InternalKey** next_smallest = nullptr) const;
+
+  virtual void GetCleanInputsWithinInterval(
+      int level, const InternalKey* begin, const InternalKey* end,
+      std::vector<FileMetaData*>* inputs, int hint_index = -1,
+      int* file_index = nullptr) const;
+
+  virtual void GetOverlappingInputsRangeBinarySearch(
+      int level, const InternalKey* begin, const InternalKey* end,
+      std::vector<FileMetaData*>* inputs, int hint_index,
+      int* file_index, bool within_interval = false,
+      InternalKey** next_smallest = nullptr) const;
+
+  virtual bool RangeMightExistAfterSortedRun(const Slice& smallest_user_key,
+                                             const Slice& largest_user_key,
+                                             int last_level,
+                                             int last_l0_idx) const {
+    return vstorage_->RangeMightExistAfterSortedRun(
+        smallest_user_key, largest_user_key, last_level, last_l0_idx);
+  }
+
+  virtual const char* LevelSummary(
+      VersionStorageInfo::LevelSummaryStorage* scratch) const {
+    return vstorage_->LevelSummary(scratch);
+  }
+
+  const InternalKeyComparator* InternalComparator() const {
+    return vstorage_->InternalComparator();
+  }
+
+  const std::vector<InternalKey>& GetCompactCursors() const {
+    return vstorage_->GetCompactCursors();
+  }
+
+  VersionStorageInfo* GetVersionStorageInfo() const {
+    return const_cast<VersionStorageInfo*>(vstorage_);
+  }
+
+ protected:
+  const VersionStorageInfo* vstorage_;
+};
+
+class VersionStorageInfoViewDelta : public VersionStorageInfoView {
+ public:
+  VersionStorageInfoViewDelta(const VersionStorageInfo* vstorage,
+                              std::unordered_set<PartitionID> partition_ids)
+      : VersionStorageInfoView(vstorage),
+        partition_ids_(partition_ids.begin(), partition_ids.end()) {}
+
+  int num_levels() const override { return 1; }
+
+  int num_non_empty_levels() const override {
+    return NumLevelFiles(0) == 0 ? 0 : 1;
+  }
+
+  size_t NumLevelFiles(int level) const override {
+    return level == 0 ? LevelFiles(0).size() : 0;
+  }
+
+  const std::vector<FileMetaData*>& LevelFiles(int level) const override {
+    if (level != 0) {
+      return EmptyLevelFiles();
+    }
+
+    level0_files_.clear();
+    for (FileMetaData* file : vstorage_->LevelFiles(0)) {
+      if (ContainsPartition(file->partition_id)) {
+        level0_files_.push_back(file);
+      }
+    }
+    return level0_files_;
+  }
+
+  const MarkedFiles& FilesMarkedForCompaction() const override {
+    return empty_marked_files_;
+  }
+
+  const MarkedFiles& FilesMarkedForPeriodicCompaction() const override {
+    return empty_marked_files_;
+  }
+
+  bool level0_non_overlapping() const override { return false; }
+
+  bool RangeMightExistAfterSortedRun(const Slice& smallest_user_key,
+                                     const Slice& largest_user_key,
+                                     int last_level,
+                                     int last_l0_idx) const override {
+    return true;
+  }
+
+  const char* LevelSummary(
+      VersionStorageInfo::LevelSummaryStorage* scratch) const override {
+    snprintf(scratch->buffer, sizeof(scratch->buffer),
+             "partition-files[0]=%" ROCKSDB_PRIszt, LevelFiles(0).size());
+    return scratch->buffer;
+  }
+
+ private:
+  static const std::vector<FileMetaData*>& EmptyLevelFiles() {
+    static const std::vector<FileMetaData*> empty_level_files;
+    return empty_level_files;
+  }
+
+  bool ContainsPartition(PartitionID pid) const {
+    return partition_ids_.count(pid);
+  }
+
+  std::unordered_set<PartitionID> partition_ids_;
+  mutable std::vector<FileMetaData*> level0_files_;
+  MarkedFiles empty_marked_files_;
 };
 
 struct ObsoleteFileInfo {

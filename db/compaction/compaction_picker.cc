@@ -103,7 +103,7 @@ bool FindIntraL0Compaction(const std::vector<FileMetaData*>& level_files,
 CompressionType GetCompressionType(const VersionStorageInfo* vstorage,
                                    const MutableCFOptions& mutable_cf_options,
                                    int level, int base_level,
-                                   const bool enable_compression) {
+    const bool enable_compression) {
   if (!enable_compression) {
     // disable compression
     return kNoCompression;
@@ -135,6 +135,15 @@ CompressionType GetCompressionType(const VersionStorageInfo* vstorage,
   }
 }
 
+CompressionType GetCompressionType(const VersionStorageInfoView* vstorage,
+                                   const MutableCFOptions& mutable_cf_options,
+                                   int level, int base_level,
+                                   const bool enable_compression) {
+  return GetCompressionType(vstorage->GetVersionStorageInfo(),
+                            mutable_cf_options, level, base_level,
+                            enable_compression);
+}
+
 CompressionOptions GetCompressionOptions(const MutableCFOptions& cf_options,
                                          const VersionStorageInfo* vstorage,
                                          int level,
@@ -149,6 +158,15 @@ CompressionOptions GetCompressionOptions(const MutableCFOptions& cf_options,
     return cf_options.bottommost_compression_opts;
   }
   return cf_options.compression_opts;
+}
+
+CompressionOptions GetCompressionOptions(
+    const MutableCFOptions& mutable_cf_options,
+    const VersionStorageInfoView* vstorage, int level,
+    const bool enable_compression) {
+  return GetCompressionOptions(mutable_cf_options,
+                               vstorage->GetVersionStorageInfo(), level,
+                               enable_compression);
 }
 
 CompactionPicker::CompactionPicker(const ImmutableOptions& ioptions,
@@ -241,7 +259,7 @@ void CompactionPicker::GetRange(const std::vector<CompactionInputFiles>& inputs,
 }
 
 bool CompactionPicker::ExpandInputsToCleanCut(const std::string& /*cf_name*/,
-                                              VersionStorageInfo* vstorage,
+                                              const VersionStorageInfoView* vstorage,
                                               CompactionInputFiles* inputs,
                                               InternalKey** next_smallest) {
   // This isn't good compaction
@@ -375,8 +393,9 @@ Compaction* CompactionPicker::CompactFiles(
     // without configurable `CompressionOptions`, which is inconsistent.
     compression_type = compact_options.compression;
   }
+  auto vstorage_view = std::make_shared<VersionStorageInfoView>(vstorage);
   auto c = new Compaction(
-      vstorage, ioptions_, mutable_cf_options, mutable_db_options, input_files,
+      vstorage_view, ioptions_, mutable_cf_options, mutable_db_options, input_files,
       output_level, compact_options.output_file_size_limit,
       mutable_cf_options.max_compaction_bytes, output_path_id, compression_type,
       GetCompressionOptions(mutable_cf_options, vstorage, output_level),
@@ -436,10 +455,9 @@ Status CompactionPicker::GetCompactionInputsFromFileNumbers(
 }
 
 // Returns true if any one of the parent files are being compacted
-bool CompactionPicker::IsRangeInCompaction(VersionStorageInfo* vstorage,
-                                           const InternalKey* smallest,
-                                           const InternalKey* largest,
-                                           int level, int* level_index) {
+bool CompactionPicker::IsRangeInCompaction(
+  const VersionStorageInfoView* vstorage, const InternalKey* smallest,
+  const InternalKey* largest, int level, int* level_index) {
   std::vector<FileMetaData*> inputs;
   assert(level < NumberLevels());
 
@@ -460,7 +478,7 @@ bool CompactionPicker::IsRangeInCompaction(VersionStorageInfo* vstorage,
 // means that we can't compact them
 bool CompactionPicker::SetupOtherInputs(
     const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
-    VersionStorageInfo* vstorage, CompactionInputFiles* inputs,
+  const VersionStorageInfoView* vstorage, CompactionInputFiles* inputs,
     CompactionInputFiles* output_level_inputs, int* parent_index,
     int base_index, bool only_expand_towards_right) {
   assert(!inputs->empty());
@@ -580,7 +598,7 @@ bool CompactionPicker::SetupOtherInputs(
 }
 
 void CompactionPicker::GetGrandparents(
-    VersionStorageInfo* vstorage, const CompactionInputFiles& inputs,
+  const VersionStorageInfoView* vstorage, const CompactionInputFiles& inputs,
     const CompactionInputFiles& output_level_inputs,
     std::vector<FileMetaData*>* grandparents) {
   InternalKey start, limit;
@@ -606,6 +624,9 @@ Compaction* CompactionPicker::CompactRange(
     uint64_t max_file_num_to_ignore, const std::string& trim_ts) {
   // CompactionPickerFIFO has its own implementation of compact range
   assert(ioptions_.compaction_style != kCompactionStyleFIFO);
+  // Delta compaction doesn't support manual compaction for now
+  assert(ioptions_.compaction_style != kCompactionStyleDelta);
+  auto vstorage_view = std::make_shared<VersionStorageInfoView>(vstorage);
 
   if (input_level == ColumnFamilyData::kCompactAllLevels) {
     assert(ioptions_.compaction_style == kCompactionStyleUniversal);
@@ -663,7 +684,7 @@ Compaction* CompactionPicker::CompactRange(
     }
 
     Compaction* c = new Compaction(
-        vstorage, ioptions_, mutable_cf_options, mutable_db_options,
+        vstorage_view, ioptions_, mutable_cf_options, mutable_db_options,
         std::move(inputs), output_level,
         MaxFileSizeForLevel(mutable_cf_options, output_level,
                             ioptions_.compaction_style),
@@ -787,7 +808,8 @@ Compaction* CompactionPicker::CompactRange(
 
   InternalKey key_storage;
   InternalKey* next_smallest = &key_storage;
-  if (ExpandInputsToCleanCut(cf_name, vstorage, &inputs, &next_smallest) ==
+  if (ExpandInputsToCleanCut(cf_name, vstorage_view.get(), &inputs,
+                             &next_smallest) ==
       false) {
     // manual compaction is now multi-threaded, so it can
     // happen that ExpandWhileOverlapping fails
@@ -811,7 +833,7 @@ Compaction* CompactionPicker::CompactRange(
   output_level_inputs.level = output_level;
   if (input_level != output_level) {
     int parent_index = -1;
-    if (!SetupOtherInputs(cf_name, mutable_cf_options, vstorage, &inputs,
+    if (!SetupOtherInputs(cf_name, mutable_cf_options, vstorage_view.get(), &inputs,
                           &output_level_inputs, &parent_index, -1)) {
       // manual compaction is now multi-threaded, so it can
       // happen that SetupOtherInputs fails
@@ -842,9 +864,9 @@ Compaction* CompactionPicker::CompactRange(
   }
 
   std::vector<FileMetaData*> grandparents;
-  GetGrandparents(vstorage, inputs, output_level_inputs, &grandparents);
+  GetGrandparents(vstorage_view.get(), inputs, output_level_inputs, &grandparents);
   Compaction* compaction = new Compaction(
-      vstorage, ioptions_, mutable_cf_options, mutable_db_options,
+      vstorage_view, ioptions_, mutable_cf_options, mutable_db_options,
       std::move(compaction_inputs), output_level,
       MaxFileSizeForLevel(mutable_cf_options, output_level,
                           ioptions_.compaction_style, vstorage->base_level(),
@@ -1138,8 +1160,9 @@ void CompactionPicker::UnregisterCompaction(Compaction* c) {
 }
 
 void CompactionPicker::PickFilesMarkedForCompaction(
-    const std::string& cf_name, VersionStorageInfo* vstorage, int* start_level,
-    int* output_level, CompactionInputFiles* start_level_inputs) {
+  const std::string& cf_name, const VersionStorageInfoView* vstorage,
+  int* start_level, int* output_level,
+  CompactionInputFiles* start_level_inputs) {
   if (vstorage->FilesMarkedForCompaction().empty()) {
     return;
   }
@@ -1184,8 +1207,9 @@ void CompactionPicker::PickFilesMarkedForCompaction(
 }
 
 bool CompactionPicker::GetOverlappingL0Files(
-    VersionStorageInfo* vstorage, CompactionInputFiles* start_level_inputs,
-    int output_level, int* parent_index) {
+  const VersionStorageInfoView* vstorage,
+  CompactionInputFiles* start_level_inputs, int output_level,
+  int* parent_index) {
   // Two level 0 compaction won't run at the same time, so don't need to worry
   // about files on level 0 being compacted.
   assert(level0_compactions_in_progress()->empty());

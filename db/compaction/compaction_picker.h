@@ -31,6 +31,7 @@ namespace ROCKSDB_NAMESPACE {
 class LogBuffer;
 class Compaction;
 class VersionStorageInfo;
+class VersionStorageInfoView;
 struct CompactionInputFiles;
 
 // An abstract class to pick compactions from an existing LSM-tree.
@@ -170,12 +171,12 @@ class CompactionPicker {
   //
   // Will return false if it is impossible to apply this compaction.
   bool ExpandInputsToCleanCut(const std::string& cf_name,
-                              VersionStorageInfo* vstorage,
+                              const VersionStorageInfoView* vstorage,
                               CompactionInputFiles* inputs,
                               InternalKey** next_smallest = nullptr);
 
   // Returns true if any one of the parent files are being compacted
-  bool IsRangeInCompaction(VersionStorageInfo* vstorage,
+  bool IsRangeInCompaction(const VersionStorageInfoView* vstorage,
                            const InternalKey* smallest,
                            const InternalKey* largest, int level, int* index);
 
@@ -186,23 +187,23 @@ class CompactionPicker {
 
   bool SetupOtherInputs(const std::string& cf_name,
                         const MutableCFOptions& mutable_cf_options,
-                        VersionStorageInfo* vstorage,
+                        const VersionStorageInfoView* vstorage,
                         CompactionInputFiles* inputs,
                         CompactionInputFiles* output_level_inputs,
                         int* parent_index, int base_index,
                         bool only_expand_towards_right = false);
 
-  void GetGrandparents(VersionStorageInfo* vstorage,
+  void GetGrandparents(const VersionStorageInfoView* vstorage,
                        const CompactionInputFiles& inputs,
                        const CompactionInputFiles& output_level_inputs,
                        std::vector<FileMetaData*>* grandparents);
 
   void PickFilesMarkedForCompaction(const std::string& cf_name,
-                                    VersionStorageInfo* vstorage,
+                                    const VersionStorageInfoView* vstorage,
                                     int* start_level, int* output_level,
                                     CompactionInputFiles* start_level_inputs);
 
-  bool GetOverlappingL0Files(VersionStorageInfo* vstorage,
+  bool GetOverlappingL0Files(const VersionStorageInfoView* vstorage,
                              CompactionInputFiles* start_level_inputs,
                              int output_level, int* parent_index);
 
@@ -314,9 +315,19 @@ CompressionType GetCompressionType(const VersionStorageInfo* vstorage,
                                    int level, int base_level,
                                    const bool enable_compression = true);
 
+CompressionType GetCompressionType(const VersionStorageInfoView* vstorage,
+                                   const MutableCFOptions& mutable_cf_options,
+                                   int level, int base_level,
+                                   const bool enable_compression = true);
+
 CompressionOptions GetCompressionOptions(
     const MutableCFOptions& mutable_cf_options,
     const VersionStorageInfo* vstorage, int level,
+    const bool enable_compression = true);
+
+CompressionOptions GetCompressionOptions(
+    const MutableCFOptions& mutable_cf_options,
+    const VersionStorageInfoView* vstorage, int level,
     const bool enable_compression = true);
 
 }  // namespace ROCKSDB_NAMESPACE

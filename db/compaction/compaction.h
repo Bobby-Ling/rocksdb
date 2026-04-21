@@ -64,12 +64,13 @@ struct CompactionInputFiles {
 class Version;
 class ColumnFamilyData;
 class VersionStorageInfo;
+class VersionStorageInfoView;
 class CompactionFilter;
 
 // A Compaction encapsulates metadata about a compaction.
 class Compaction {
  public:
-  Compaction(VersionStorageInfo* input_version,
+  Compaction(std::shared_ptr<VersionStorageInfoView> vstorage_view,
              const ImmutableOptions& immutable_options,
              const MutableCFOptions& mutable_cf_options,
              const MutableDBOptions& mutable_db_options,
@@ -87,6 +88,34 @@ class Compaction {
                  BlobGarbageCollectionPolicy::kUseDefault,
              double blob_garbage_collection_age_cutoff = -1,
              std::shared_ptr<PartitionTable::Plan> compaction_plan = nullptr);
+
+  Compaction(VersionStorageInfo* vstorage,
+             const ImmutableOptions& immutable_options,
+             const MutableCFOptions& mutable_cf_options,
+             const MutableDBOptions& mutable_db_options,
+             std::vector<CompactionInputFiles> inputs, int output_level,
+             uint64_t target_file_size, uint64_t max_compaction_bytes,
+             uint32_t output_path_id, CompressionType compression,
+             CompressionOptions compression_opts,
+             Temperature output_temperature, uint32_t max_subcompactions,
+             std::vector<FileMetaData*> grandparents,
+             bool manual_compaction = false, const std::string& trim_ts = "",
+             double score = -1, bool deletion_compaction = false,
+             bool l0_files_might_overlap = true,
+             CompactionReason compaction_reason = CompactionReason::kUnknown,
+             BlobGarbageCollectionPolicy blob_garbage_collection_policy =
+                 BlobGarbageCollectionPolicy::kUseDefault,
+             double blob_garbage_collection_age_cutoff = -1,
+             std::shared_ptr<PartitionTable::Plan> compaction_plan = nullptr)
+      : Compaction(std::make_shared<VersionStorageInfoView>(vstorage),
+                   immutable_options, mutable_cf_options, mutable_db_options,
+                   std::move(inputs), output_level, target_file_size,
+                   max_compaction_bytes, output_path_id, compression,
+                   compression_opts, output_temperature, max_subcompactions,
+                   std::move(grandparents), manual_compaction, trim_ts, score,
+                   deletion_compaction, l0_files_might_overlap,
+                   compaction_reason, blob_garbage_collection_policy,
+                   blob_garbage_collection_age_cutoff, compaction_plan) {};
 
   // No copying allowed
   Compaction(const Compaction&) = delete;
@@ -330,6 +359,10 @@ class Compaction {
 
   CompactionReason compaction_reason() const { return compaction_reason_; }
 
+  void SetCompactionReason(CompactionReason compaction_reason) {
+    compaction_reason_ = compaction_reason;
+  }
+
   const std::vector<FileMetaData*>& grandparents() const {
     return grandparents_;
   }
@@ -339,6 +372,10 @@ class Compaction {
   Temperature output_temperature() const { return output_temperature_; }
 
   uint32_t max_subcompactions() const { return max_subcompactions_; }
+
+  void SetMaxSubcompactions(uint32_t max_subcompactions) {
+    max_subcompactions_ = max_subcompactions;
+  }
 
   bool enable_blob_garbage_collection() const {
     return enable_blob_garbage_collection_;
@@ -367,6 +404,11 @@ class Compaction {
     return compaction_plan_;
   }
 
+  void SetCompactionPlan(
+      const std::shared_ptr<PartitionTable::Plan>& compaction_plan) {
+    compaction_plan_ = compaction_plan;
+  }
+
   static constexpr int kInvalidLevel = -1;
   // Evaluate penultimate output level. If the compaction supports
   // per_key_placement feature, it returns the penultimate level number.
@@ -381,7 +423,7 @@ class Compaction {
   void MarkFilesBeingCompacted(bool mark_as_compacted);
 
   // get the smallest and largest key present in files to be compacted
-  static void GetBoundaryKeys(VersionStorageInfo* vstorage,
+  static void GetBoundaryKeys(const VersionStorageInfoView* vstorage,
                               const std::vector<CompactionInputFiles>& inputs,
                               Slice* smallest_key, Slice* largest_key,
                               int exclude_level = -1);
@@ -402,18 +444,21 @@ class Compaction {
   // plumb down appropriate key boundaries to RangeDelAggregator during
   // compaction.
   static std::vector<CompactionInputFiles> PopulateWithAtomicBoundaries(
-      VersionStorageInfo* vstorage, std::vector<CompactionInputFiles> inputs);
+      const VersionStorageInfoView* vstorage,
+      std::vector<CompactionInputFiles> inputs);
 
   // helper function to determine if compaction with inputs and storage is
   // bottommost
   static bool IsBottommostLevel(
-      int output_level, VersionStorageInfo* vstorage,
+      int output_level, VersionStorageInfoView* vstorage,
       const std::vector<CompactionInputFiles>& inputs);
 
-  static bool IsFullCompaction(VersionStorageInfo* vstorage,
-                               const std::vector<CompactionInputFiles>& inputs);
+  static bool IsFullCompaction(
+      const VersionStorageInfoView* vstorage,
+      const std::vector<CompactionInputFiles>& inputs);
 
   VersionStorageInfo* input_vstorage_;
+  std::shared_ptr<VersionStorageInfoView> input_vstorage_view_;
 
   const int start_level_;   // the lowest level to be compacted
   const int output_level_;  // levels to which output files are stored

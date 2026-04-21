@@ -122,6 +122,7 @@ class LevelCompactionBuilder {
 
   const std::string& cf_name_;
   VersionStorageInfo* vstorage_;
+  std::shared_ptr<VersionStorageInfoView> vstorage_view_;
   SequenceNumber earliest_mem_seqno_;
   CompactionPicker* compaction_picker_;
   LogBuffer* log_buffer_;
@@ -172,7 +173,7 @@ void LevelCompactionBuilder::PickFileToCompact(
     }
     start_level_inputs_.files = {level_file.second};
     start_level_inputs_.level = start_level_;
-    if (compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+    if (compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_view_.get(),
                                                    &start_level_inputs_)) {
       return;
     }
@@ -240,7 +241,8 @@ void LevelCompactionBuilder::SetupInitialFiles() {
   parent_index_ = base_index_ = -1;
 
   compaction_picker_->PickFilesMarkedForCompaction(
-      cf_name_, vstorage_, &start_level_, &output_level_, &start_level_inputs_);
+      cf_name_, vstorage_view_.get(), &start_level_, &output_level_,
+      &start_level_inputs_);
   if (!start_level_inputs_.empty()) {
     compaction_reason_ = CompactionReason::kFilesMarkedForCompaction;
     return;
@@ -278,7 +280,7 @@ void LevelCompactionBuilder::SetupInitialFiles() {
 bool LevelCompactionBuilder::SetupOtherL0FilesIfNeeded() {
   if (start_level_ == 0 && output_level_ != 0 && !is_l0_trivial_move_) {
     return compaction_picker_->GetOverlappingL0Files(
-        vstorage_, &start_level_inputs_, output_level_, &parent_index_);
+        vstorage_view_.get(), &start_level_inputs_, output_level_, &parent_index_);
   }
   return true;
 }
@@ -357,7 +359,7 @@ void LevelCompactionBuilder::SetupOtherFilesWithRoundRobinExpansion() {
     }
 
     tmp_start_level_inputs.files.push_back(f);
-    if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+    if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_view_.get(),
                                                     &tmp_start_level_inputs) ||
         compaction_picker_->FilesRangeOverlapWithCompaction(
             {tmp_start_level_inputs}, output_level_)) {
@@ -376,7 +378,7 @@ void LevelCompactionBuilder::SetupOtherFilesWithRoundRobinExpansion() {
     vstorage_->GetOverlappingInputs(output_level_, &smallest, &largest,
                                     &output_level_inputs.files);
     if (!output_level_inputs.empty() &&
-        !compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+        !compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_view_.get(),
                                                     &output_level_inputs)) {
       // Constraint 1a
       tmp_start_level_inputs.clear();
@@ -415,7 +417,7 @@ bool LevelCompactionBuilder::SetupOtherInputsIfNeeded() {
     }
     if (!is_l0_trivial_move_ &&
         !compaction_picker_->SetupOtherInputs(
-            cf_name_, mutable_cf_options_, vstorage_, &start_level_inputs_,
+            cf_name_, mutable_cf_options_, vstorage_view_.get(), &start_level_inputs_,
             &output_level_inputs_, &parent_index_, base_index_,
             round_robin_expanding)) {
       return false;
@@ -439,7 +441,7 @@ bool LevelCompactionBuilder::SetupOtherInputsIfNeeded() {
         // of a currently running compaction, we cannot run it.
         return false;
       }
-      compaction_picker_->GetGrandparents(vstorage_, start_level_inputs_,
+      compaction_picker_->GetGrandparents(vstorage_view_.get(), start_level_inputs_,
                                           output_level_inputs_, &grandparents_);
     }
   } else {
@@ -479,7 +481,7 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
 
 Compaction* LevelCompactionBuilder::GetCompaction() {
   auto c = new Compaction(
-      vstorage_, ioptions_, mutable_cf_options_, mutable_db_options_,
+      vstorage_view_, ioptions_, mutable_cf_options_, mutable_db_options_,
       std::move(compaction_inputs_), output_level_,
       MaxFileSizeForLevel(mutable_cf_options_, output_level_,
                           ioptions_.compaction_style, vstorage_->base_level(),
@@ -728,7 +730,7 @@ bool LevelCompactionBuilder::PickFileToCompact() {
     }
 
     start_level_inputs_.files.push_back(f);
-    if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+    if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_view_.get(),
                                                     &start_level_inputs_) ||
         compaction_picker_->FilesRangeOverlapWithCompaction(
             {start_level_inputs_}, output_level_)) {
@@ -759,7 +761,7 @@ bool LevelCompactionBuilder::PickFileToCompact() {
         break;
       }
     } else {
-      if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+      if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_view_.get(),
                                                       &output_level_inputs)) {
         start_level_inputs_.clear();
         if (ioptions_.compaction_pri == kRoundRobin) {

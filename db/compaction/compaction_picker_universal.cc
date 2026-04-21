@@ -27,123 +27,6 @@
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
-// A helper class that form universal compactions. The class is used by
-// UniversalCompactionPicker::PickCompaction().
-// The usage is to create the class, and get the compaction object by calling
-// PickCompaction().
-class UniversalCompactionBuilder {
- public:
-  UniversalCompactionBuilder(
-      const ImmutableOptions& ioptions, const InternalKeyComparator* icmp,
-      const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
-      const MutableDBOptions& mutable_db_options, VersionStorageInfo* vstorage,
-      UniversalCompactionPicker* picker, LogBuffer* log_buffer)
-      : ioptions_(ioptions),
-        icmp_(icmp),
-        cf_name_(cf_name),
-        mutable_cf_options_(mutable_cf_options),
-        mutable_db_options_(mutable_db_options),
-        vstorage_(vstorage),
-        picker_(picker),
-        log_buffer_(log_buffer) {}
-
-  // Form and return the compaction object. The caller owns return object.
-  Compaction* PickCompaction();
-
- private:
-  struct SortedRun {
-    SortedRun(int _level, FileMetaData* _file, uint64_t _size,
-              uint64_t _compensated_file_size, bool _being_compacted)
-        : level(_level),
-          file(_file),
-          size(_size),
-          compensated_file_size(_compensated_file_size),
-          being_compacted(_being_compacted) {
-      assert(compensated_file_size > 0);
-      assert(level != 0 || file != nullptr);
-    }
-
-    void Dump(char* out_buf, size_t out_buf_size,
-              bool print_path = false) const;
-
-    // sorted_run_count is added into the string to print
-    void DumpSizeInfo(char* out_buf, size_t out_buf_size,
-                      size_t sorted_run_count) const;
-
-    int level;
-    // `file` Will be null for level > 0. For level = 0, the sorted run is
-    // for this file.
-    FileMetaData* file;
-    // For level > 0, `size` and `compensated_file_size` are sum of sizes all
-    // files in the level. `being_compacted` should be the same for all files
-    // in a non-zero level. Use the value here.
-    uint64_t size;
-    uint64_t compensated_file_size;
-    bool being_compacted;
-  };
-
-  // Pick Universal compaction to limit read amplification
-  Compaction* PickCompactionToReduceSortedRuns(
-      unsigned int ratio, unsigned int max_number_of_files_to_compact);
-
-  // Pick Universal compaction to limit space amplification.
-  Compaction* PickCompactionToReduceSizeAmp();
-
-  // Try to pick incremental compaction to reduce space amplification.
-  // It will return null if it cannot find a fanout within the threshold.
-  // Fanout is defined as
-  //    total size of files to compact at output level
-  //  --------------------------------------------------
-  //    total size of files to compact at other levels
-  Compaction* PickIncrementalForReduceSizeAmp(double fanout_threshold);
-
-  Compaction* PickDeleteTriggeredCompaction();
-
-  // Form a compaction from the sorted run indicated by start_index to the
-  // oldest sorted run.
-  // The caller is responsible for making sure that those files are not in
-  // compaction.
-  Compaction* PickCompactionToOldest(size_t start_index,
-                                     CompactionReason compaction_reason);
-
-  Compaction* PickCompactionWithSortedRunRange(
-      size_t start_index, size_t end_index, CompactionReason compaction_reason);
-
-  // Try to pick periodic compaction. The caller should only call it
-  // if there is at least one file marked for periodic compaction.
-  // null will be returned if no such a compaction can be formed
-  // because some files are being compacted.
-  Compaction* PickPeriodicCompaction();
-
-  // Used in universal compaction when the allow_trivial_move
-  // option is set. Checks whether there are any overlapping files
-  // in the input. Returns true if the input files are non
-  // overlapping.
-  bool IsInputFilesNonOverlapping(Compaction* c);
-
-  uint64_t GetMaxOverlappingBytes() const;
-
-  const ImmutableOptions& ioptions_;
-  const InternalKeyComparator* icmp_;
-  double score_;
-  std::vector<SortedRun> sorted_runs_;
-  const std::string& cf_name_;
-  const MutableCFOptions& mutable_cf_options_;
-  const MutableDBOptions& mutable_db_options_;
-  VersionStorageInfo* vstorage_;
-  UniversalCompactionPicker* picker_;
-  LogBuffer* log_buffer_;
-
-  static std::vector<SortedRun> CalculateSortedRuns(
-      const VersionStorageInfo& vstorage);
-
-  // Pick a path ID to place a newly generated file, with its estimated file
-  // size.
-  static uint32_t GetPathId(const ImmutableCFOptions& ioptions,
-                            const MutableCFOptions& mutable_cf_options,
-                            uint64_t file_size);
-};
-
 // Used in universal compaction when trivial move is enabled.
 // This structure is used for the construction of min heap
 // that contains the file meta data, the level of the file
@@ -230,6 +113,8 @@ void GetSmallestLargestSeqno(const std::vector<FileMetaData*>& files,
 #endif
 }  // namespace
 
+using namespace ROCKSDB_UNIVERSAL_COMPACTION_BUILDER;
+
 // Algorithm that checks to see if there are any overlapping
 // files in the input
 bool UniversalCompactionBuilder::IsInputFilesNonOverlapping(Compaction* c) {
@@ -294,9 +179,10 @@ Compaction* UniversalCompactionPicker::PickCompaction(
     const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
     const MutableDBOptions& mutable_db_options, VersionStorageInfo* vstorage,
     LogBuffer* log_buffer, SequenceNumber /* earliest_memtable_seqno */) {
+  auto vstorage_view = std::make_shared<VersionStorageInfoView>(vstorage);
   UniversalCompactionBuilder builder(ioptions_, icmp_, cf_name,
                                      mutable_cf_options, mutable_db_options,
-                                     vstorage, this, log_buffer);
+                                     vstorage_view, this, log_buffer);
   return builder.PickCompaction();
 }
 
@@ -339,7 +225,7 @@ void UniversalCompactionBuilder::SortedRun::DumpSizeInfo(
 
 std::vector<UniversalCompactionBuilder::SortedRun>
 UniversalCompactionBuilder::CalculateSortedRuns(
-    const VersionStorageInfo& vstorage) {
+    const VersionStorageInfoView& vstorage) {
   std::vector<UniversalCompactionBuilder::SortedRun> ret;
   for (FileMetaData* f : vstorage.LevelFiles(0)) {
     ret.emplace_back(0, f, f->fd.GetFileSize(), f->compensated_file_size,
@@ -373,6 +259,7 @@ UniversalCompactionBuilder::CalculateSortedRuns(
 // time-range to compact.
 Compaction* UniversalCompactionBuilder::PickCompaction() {
   const int kLevel0 = 0;
+  // score_在此不参与决策, 并不重要
   score_ = vstorage_->CompactionScore(kLevel0);
   sorted_runs_ = CalculateSortedRuns(*vstorage_);
 
@@ -508,7 +395,7 @@ Compaction* UniversalCompactionBuilder::PickCompaction() {
   RecordInHistogram(ioptions_.stats, NUM_FILES_IN_SINGLE_COMPACTION, num_files);
 
   picker_->RegisterCompaction(c);
-  vstorage_->ComputeCompactionScore(ioptions_, mutable_cf_options_);
+  vstorage_->GetVersionStorageInfo()->ComputeCompactionScore(ioptions_, mutable_cf_options_);
 
   TEST_SYNC_POINT_CALLBACK("UniversalCompactionBuilder::PickCompaction:Return",
                            c);
@@ -754,9 +641,9 @@ Compaction* UniversalCompactionBuilder::PickCompactionToReduceSortedRuns(
                         MaxFileSizeForLevel(mutable_cf_options_, output_level,
                                             kCompactionStyleUniversal),
                         GetMaxOverlappingBytes(), path_id,
-                        GetCompressionType(vstorage_, mutable_cf_options_,
+                        GetCompressionType(vstorage_.get(), mutable_cf_options_,
                                            output_level, 1, enable_compression),
-                        GetCompressionOptions(mutable_cf_options_, vstorage_,
+                        GetCompressionOptions(mutable_cf_options_, vstorage_.get(),
                                               output_level, enable_compression),
                         Temperature::kUnknown,
                         /* max_subcompactions */ 0, grandparents,
@@ -1036,7 +923,7 @@ Compaction* UniversalCompactionBuilder::PickIncrementalForReduceSizeAmp(
     second_last_level_inputs.files.push_back(files[i]);
   }
   assert(!second_last_level_inputs.empty());
-  if (!picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+  if (!picker_->ExpandInputsToCleanCut(cf_name_, vstorage_.get(),
                                        &second_last_level_inputs,
                                        /*next_smallest=*/nullptr)) {
     return nullptr;
@@ -1045,7 +932,7 @@ Compaction* UniversalCompactionBuilder::PickIncrementalForReduceSizeAmp(
   // from bottom_start_idx and bottom_end_idx, but for now, we use
   // SetupOtherInputs() for simplicity.
   int parent_index = -1;  // Create and use bottom_start_idx?
-  if (!picker_->SetupOtherInputs(cf_name_, mutable_cf_options_, vstorage_,
+  if (!picker_->SetupOtherInputs(cf_name_, mutable_cf_options_, vstorage_.get(),
                                  &second_last_level_inputs,
                                  &bottom_level_inputs, &parent_index,
                                  /*base_index=*/-1)) {
@@ -1089,9 +976,9 @@ Compaction* UniversalCompactionBuilder::PickIncrementalForReduceSizeAmp(
       MaxFileSizeForLevel(mutable_cf_options_, output_level,
                           kCompactionStyleUniversal),
       GetMaxOverlappingBytes(), path_id,
-      GetCompressionType(vstorage_, mutable_cf_options_, output_level, 1,
+      GetCompressionType(vstorage_.get(), mutable_cf_options_, output_level, 1,
                          true /* enable_compression */),
-      GetCompressionOptions(mutable_cf_options_, vstorage_, output_level,
+      GetCompressionOptions(mutable_cf_options_, vstorage_.get(), output_level,
                             true /* enable_compression */),
       Temperature::kUnknown,
       /* max_subcompactions */ 0, /* grandparents */ {}, /* is manual */ false,
@@ -1157,7 +1044,7 @@ Compaction* UniversalCompactionBuilder::PickDeleteTriggeredCompaction() {
     // For multi-level universal, the strategy is to make this look more like
     // leveled. We pick one of the files marked for compaction and compact with
     // overlapping files in the adjacent level.
-    picker_->PickFilesMarkedForCompaction(cf_name_, vstorage_, &start_level,
+    picker_->PickFilesMarkedForCompaction(cf_name_, vstorage_.get(), &start_level,
                                           &output_level, &start_level_inputs);
     if (start_level_inputs.empty()) {
       return nullptr;
@@ -1191,7 +1078,7 @@ Compaction* UniversalCompactionBuilder::PickDeleteTriggeredCompaction() {
 
     if (output_level != 0) {
       if (start_level == 0) {
-        if (!picker_->GetOverlappingL0Files(vstorage_, &start_level_inputs,
+        if (!picker_->GetOverlappingL0Files(vstorage_.get(), &start_level_inputs,
                                             output_level, nullptr)) {
           return nullptr;
         }
@@ -1201,7 +1088,7 @@ Compaction* UniversalCompactionBuilder::PickDeleteTriggeredCompaction() {
       int parent_index = -1;
 
       output_level_inputs.level = output_level;
-      if (!picker_->SetupOtherInputs(cf_name_, mutable_cf_options_, vstorage_,
+      if (!picker_->SetupOtherInputs(cf_name_, mutable_cf_options_, vstorage_.get(),
                                      &start_level_inputs, &output_level_inputs,
                                      &parent_index, -1)) {
         return nullptr;
@@ -1214,7 +1101,7 @@ Compaction* UniversalCompactionBuilder::PickDeleteTriggeredCompaction() {
         return nullptr;
       }
 
-      picker_->GetGrandparents(vstorage_, start_level_inputs,
+      picker_->GetGrandparents(vstorage_.get(), start_level_inputs,
                                output_level_inputs, &grandparents);
     } else {
       inputs.push_back(start_level_inputs);
@@ -1234,8 +1121,8 @@ Compaction* UniversalCompactionBuilder::PickDeleteTriggeredCompaction() {
       MaxFileSizeForLevel(mutable_cf_options_, output_level,
                           kCompactionStyleUniversal),
       /* max_grandparent_overlap_bytes */ GetMaxOverlappingBytes(), path_id,
-      GetCompressionType(vstorage_, mutable_cf_options_, output_level, 1),
-      GetCompressionOptions(mutable_cf_options_, vstorage_, output_level),
+      GetCompressionType(vstorage_.get(), mutable_cf_options_, output_level, 1),
+      GetCompressionOptions(mutable_cf_options_, vstorage_.get(), output_level),
       Temperature::kUnknown,
       /* max_subcompactions */ 0, grandparents, /* is manual */ false,
       /* trim_ts */ "", score_, false /* deletion_compaction */,
@@ -1321,9 +1208,9 @@ Compaction* UniversalCompactionBuilder::PickCompactionWithSortedRunRange(
       MaxFileSizeForLevel(mutable_cf_options_, output_level,
                           kCompactionStyleUniversal),
       GetMaxOverlappingBytes(), path_id,
-      GetCompressionType(vstorage_, mutable_cf_options_, output_level, 1,
+      GetCompressionType(vstorage_.get(), mutable_cf_options_, output_level, 1,
                          true /* enable_compression */),
-      GetCompressionOptions(mutable_cf_options_, vstorage_, output_level,
+      GetCompressionOptions(mutable_cf_options_, vstorage_.get(), output_level,
                             true /* enable_compression */),
       Temperature::kUnknown,
       /* max_subcompactions */ 0, /* grandparents */ {}, /* is manual */ false,
