@@ -338,6 +338,17 @@ void PartitionTable::Merge(PartitionID left_pid, PartitionID right_pid) {
 }
 
 PartitionTable::CompactionType PartitionTable::NeedCompaction() const {
+  // Check intra-partition compaction first (highest priority).
+  if (partition_file_num_compaction_trigger_ !=
+      std::numeric_limits<uint32_t>::max()) {
+    for (const auto& kv : partition_storage) {
+      if (kv.second.stats.file_count >=
+          static_cast<int64_t>(partition_file_num_compaction_trigger_)) {
+        return CompactionType::kPartition;
+      }
+    }
+  }
+
   int64_t pt_total = 0;
   for (const auto& kv : partition_storage) {
     pt_total += kv.second.stats.growth_rate;
@@ -357,6 +368,31 @@ PartitionTable::CompactionType PartitionTable::NeedCompaction() const {
     }
   }
   return CompactionType::kNone;
+}
+
+std::optional<PartitionTable::PartitionCompactionPlan>
+PartitionTable::GetPartitionCompactionPlan() const {
+  if (partition_file_num_compaction_trigger_ ==
+      std::numeric_limits<uint32_t>::max() ||
+      partition_storage.empty()) {
+    return std::nullopt;
+  }
+  const int64_t threshold =
+      static_cast<int64_t>(partition_file_num_compaction_trigger_);
+  PartitionID best_pid = kInvalidPartitionID;
+  int64_t best_count = threshold - 1;  // must exceed threshold
+  for (const auto& kv : partition_storage) {
+    if (kv.second.stats.file_count > best_count) {
+      best_count = kv.second.stats.file_count;
+      best_pid = kv.second.partition_id;
+    }
+  }
+  if (best_pid == kInvalidPartitionID) {
+    return std::nullopt;
+  }
+  PartitionCompactionPlan plan;
+  plan.pid = best_pid;
+  return plan;
 }
 
 std::shared_ptr<PartitionTable> PartitionTable::ApplyToNewTable(

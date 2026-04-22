@@ -83,6 +83,8 @@ const char* GetCompactionReasonString(CompactionReason compaction_reason) {
       return "DeltaMerge";
     case CompactionReason::kDeltaSplit:
       return "DeltaSplit";
+    case CompactionReason::kDeltaPartition:
+      return "DeltaPartition";
     case CompactionReason::kManualCompaction:
       return "ManualCompaction";
     case CompactionReason::kFilesMarkedForCompaction:
@@ -1641,6 +1643,32 @@ Status CompactionJob::InstallCompactionResults(
         pt_editor->AddSplit(*split_plan, boundaries_.front());
       }
     }
+    // Maintain file_count for all delta compaction plan;
+    {
+      std::unordered_map<PartitionID, int64_t> file_count_delta;
+      // Inputs are removed (negative contribution)
+      assert(compaction->num_input_levels() == 1);
+      for (const FileMetaData* f : *compaction->inputs(0)) {
+        if (f->partition_id != kInvalidPartitionID) {
+          file_count_delta[f->partition_id] -= 1;
+        }
+      }
+      // Outputs are added (positive contribution)
+      for (const auto& sub_compact : compact_->sub_compact_states) {
+        for (const auto& output : sub_compact.GetOutputs()) {
+          if (output.meta.partition_id != kInvalidPartitionID) {
+            file_count_delta[output.meta.partition_id] += 1;
+          }
+        }
+      }
+      for (const auto& [pid, delta] : file_count_delta) {
+        if (delta != 0) {
+          PartitionStats stats;
+          stats.file_count = delta;
+          pt_editor->UpdatePartitionStats(pid, stats);
+        }
+      }
+    }
   }
 
   // Add compaction inputs
@@ -1839,6 +1867,11 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
             meta.partition_id = split_plan->new_pid;
           }
         }
+      } else if (plan->type == PartitionTable::Plan::Type::kPartition) {
+        auto partition_plan =
+            std::static_pointer_cast<PartitionTable::PartitionCompactionPlan>(
+                plan);
+        meta.partition_id = partition_plan->pid;
       }
     }
 

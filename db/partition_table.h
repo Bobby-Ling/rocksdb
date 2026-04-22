@@ -21,7 +21,7 @@ static constexpr PartitionID kInvalidPartitionID = -1;
 struct PartitionStats {
   int64_t growth_rate = 0;
   uint64_t flush_count = 0;
-  uint64_t file_count = 0;
+  int64_t file_count = 0;
   uint64_t point_entries = 0;
   uint64_t total_entries = 0;
   uint64_t point_deletions = 0;
@@ -62,7 +62,7 @@ struct PartitionStats {
     PartitionStats scaled;
     scaled.growth_rate = static_cast<int64_t>(growth_rate * ratio);
     scaled.flush_count = static_cast<uint64_t>(flush_count * ratio);
-    scaled.file_count = static_cast<uint64_t>(file_count * ratio);
+    scaled.file_count = static_cast<int64_t>(file_count * ratio);
     scaled.point_entries = static_cast<uint64_t>(point_entries * ratio);
     scaled.total_entries = static_cast<uint64_t>(total_entries * ratio);
     scaled.point_deletions = static_cast<uint64_t>(point_deletions * ratio);
@@ -78,7 +78,7 @@ struct PartitionStats {
   std::string DebugString() const {
     return "PartitionStats{growth_rate=" + std::to_string(growth_rate) +
            ", flush_count=" + std::to_string(flush_count) +
-           ", file_count=" + std::to_string(file_count) +
+           ", file_count=" + std::to_string(file_count) +  // int64_t
            ", point_entries=" + std::to_string(point_entries) +
            ", total_entries=" + std::to_string(total_entries) +
            ", point_deletions=" + std::to_string(point_deletions) +
@@ -122,11 +122,22 @@ class PartitionTable {
   friend class PartitionTableEdits;
   // RTTI仅在Debug下
   struct Plan {
-    enum class Type : uint8_t { kSplit, kMerge };
+    enum class Type : uint8_t { kSplit, kMerge, kPartition };
     explicit Plan(Type type) : type(type) {}
     virtual ~Plan() = default;
     virtual std::string DebugString() const = 0;
     Type type;
+  };
+
+  // Intra-partition compaction: reduce sorted runs inside a single partition
+  // using Universal compaction without changing partition boundaries.
+  struct PartitionCompactionPlan : Plan {
+    PartitionCompactionPlan() : Plan(Type::kPartition) {}
+    ~PartitionCompactionPlan() override = default;
+    std::string DebugString() const override {
+      return "PartitionCompactionPlan{pid=" + std::to_string(pid) + "}";
+    }
+    PartitionID pid;
   };
 
   struct SplitPlan : Plan {
@@ -153,13 +164,18 @@ class PartitionTable {
   PartitionTable() = default;
   PartitionTable(uint32_t max_partitions,
                           double split_grouth_threshold,
-                          double merge_growth_threshold)
+                          double merge_growth_threshold,
+                          uint32_t partition_file_num_compaction_trigger =
+                              std::numeric_limits<uint32_t>::max())
       : max_partitions_(max_partitions),
         split_growth_threshold_(split_grouth_threshold),
-        merge_growth_threshold_(merge_growth_threshold) {}
+        merge_growth_threshold_(merge_growth_threshold),
+        partition_file_num_compaction_trigger_(
+            partition_file_num_compaction_trigger) {}
   PartitionTable(const PartitionTable& other)
       : PartitionTable(other.max_partitions_, other.split_growth_threshold_,
-                       other.merge_growth_threshold_) {
+                       other.merge_growth_threshold_,
+                       other.partition_file_num_compaction_trigger_) {
     next_partition_id_ = other.next_partition_id_;
     partition_storage = other.partition_storage;
     // growth_rate_index = other.growth_rate_index;
@@ -183,10 +199,14 @@ class PartitionTable {
   PartitionTable& operator=(PartitionTable&&) noexcept = delete;
 
   void SetOptions(uint32_t max_partitions, double split_grouth_threshold,
-                  double merge_growth_threshold) {
+                  double merge_growth_threshold,
+                  uint32_t partition_file_num_compaction_trigger =
+                      std::numeric_limits<uint32_t>::max()) {
     this->max_partitions_ = max_partitions;
     this->split_growth_threshold_ = split_grouth_threshold;
     this->merge_growth_threshold_ = merge_growth_threshold;
+    this->partition_file_num_compaction_trigger_ =
+        partition_file_num_compaction_trigger;
   };
 
  private:
@@ -204,6 +224,11 @@ class PartitionTable {
   uint32_t max_partitions_ = std::numeric_limits<uint32_t>::max();
   double split_growth_threshold_ = std::numeric_limits<double>::max();
   double merge_growth_threshold_ = std::numeric_limits<double>::max();
+  // Trigger intra-partition compaction when a partition's file_count reaches
+  // this threshold. Defaults to max (disabled). Set via SetOptions() at
+  // runtime from level0_file_num_compaction_trigger or dedicated option.
+  uint32_t partition_file_num_compaction_trigger_ =
+      std::numeric_limits<uint32_t>::max();
 
   using PartitionTableStorage =
       std::map<std::optional<std::string>, PartitionInfo, Comparator>;
@@ -256,7 +281,12 @@ class PartitionTable {
 
   std::shared_ptr<Plan> GetCompactionPlan() const {
     auto compaction_type = NeedCompaction();
-    if (compaction_type == CompactionType::kSplit) {
+    if (compaction_type == CompactionType::kPartition) {
+      auto plan = GetPartitionCompactionPlan();
+      if (plan) {
+        return std::make_shared<PartitionCompactionPlan>(*plan);
+      }
+    } else if (compaction_type == CompactionType::kSplit) {
       auto split_plan = GetSplitPlan();
       if (split_plan) {
         return std::make_shared<SplitPlan>(*split_plan);
@@ -270,13 +300,22 @@ class PartitionTable {
     return nullptr;
   }
 
+  // 若存在 file_count >= partition_file_num_compaction_trigger_ 的分区，
+  // 则返回 file_count 最大的那个。
+  std::optional<PartitionCompactionPlan> GetPartitionCompactionPlan() const;
+
   // 若存在超过 split_thresh 的分区且当前总分区数 < max_parts，则返回候选。
   std::optional<SplitPlan> GetSplitPlan() const;
 
   // 若存在低于 merge_thresh 的分区，则返回相邻两个合并候选。
   std::optional<MergePlan> GetMergePlan() const;
 
-  enum class CompactionType : uint8_t { kNone = 0, kMerge = 1, kSplit = 2 };
+  enum class CompactionType : uint8_t {
+    kNone = 0,
+    kMerge = 1,
+    kSplit = 2,
+    kPartition = 3
+  };
   CompactionType NeedCompaction() const;
   double ComputeCompactionScore() const {
     return static_cast<double>(NeedCompaction());

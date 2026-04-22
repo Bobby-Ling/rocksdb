@@ -21,7 +21,16 @@ using ROCKSDB_UNIVERSAL_COMPACTION_BUILDER::UniversalCompactionBuilder;
 bool DeltaCompactionPicker::NeedsCompaction(
     const VersionStorageInfo* vstorage) const {
   // Score is set by VersionStorageInfo::ComputeCompactionScore for Delta style.
-  return vstorage->CompactionScore(0) >= 1;
+  auto pt = vstorage->GetPartitionTable();
+  if (!pt || !pt->IsInitialized()) {
+    return false;
+  }
+  bool needs_compaction =
+      pt->NeedCompaction() != PartitionTable::CompactionType::kNone;
+  ROCKS_LOG_INFO(ioptions_.info_log,
+                 "DeltaCompactionPicker::NeedsCompaction() returns %d",
+                 needs_compaction);
+  return needs_compaction;
 }
 
 Compaction* DeltaCompactionPicker::PickCompaction(
@@ -53,6 +62,12 @@ Compaction* DeltaCompactionPicker::PickCompaction(
     partition_ids.insert(merge_plan->right_pid);
     target_partition_count = 1;
     reason = CompactionReason::kDeltaMerge;
+  } else if (plan->type == PartitionTable::Plan::Type::kPartition) {
+    auto partition_plan =
+        std::static_pointer_cast<PartitionTable::PartitionCompactionPlan>(plan);
+    partition_ids.insert(partition_plan->pid);
+    target_partition_count = 1;
+    reason = CompactionReason::kDeltaPartition;
   } else {
     assert(false);
     return nullptr;

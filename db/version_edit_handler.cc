@@ -649,9 +649,13 @@ Status VersionEditHandler::ExtractInfoFromVersionEdit(ColumnFamilyData* cfd,
       // 已经VersionEditHandler::Initialize()过了
       s = ApplyPartitionTableState(edit, cfd, partition_table);
       if (!s.ok()) {
-        auto delta_options = cfd->GetLatestMutableCFOptions()->compaction_options_delta;
-        partition_table->SetOptions(delta_options.max_partitions, delta_options.partition_split_growth_threshold,
-                                    delta_options.partition_merge_growth_threshold);
+        auto delta_options =
+            cfd->GetLatestMutableCFOptions()->compaction_options_delta;
+        partition_table->SetOptions(
+            delta_options.max_partitions,
+            delta_options.partition_split_growth_threshold,
+            delta_options.partition_merge_growth_threshold,
+            delta_options.partition_file_num_compaction_trigger);
         return s;
       }
     }

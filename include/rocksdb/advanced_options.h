@@ -272,6 +272,10 @@ struct CompactionOptionsDelta {
   // Target number of bytes per SST file within a partition (0 = no limit).
   // Default: 64MB
   uint64_t partition_target_file_size = 64 * 1048576;
+
+  // Trigger intra-partition Universal compaction
+  // Default: 4
+  uint32_t partition_file_num_compaction_trigger = 4;
 };
 
 struct AdvancedColumnFamilyOptions {

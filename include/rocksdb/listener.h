@@ -132,6 +132,8 @@ enum class CompactionReason : int {
   kDeltaMerge,
   // [Delta] Split
   kDeltaSplit,
+  // [Delta] Intra-partition compaction (reduce sorted runs within a partition)
+  kDeltaPartition,
   // Manual compaction
   kManualCompaction,
   // DB::SuggestCompactRange() marked files for compaction

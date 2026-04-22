@@ -46,9 +46,9 @@ KEY_DIST_A=1.0
 KEY_DIST_B=0
 
 # DeltaBench config
-DELTA_BENCH_ROWSET_NUM=16
-DELTA_BENCH_ROWSET_TRIGGER_PERCENT=80
-DELTA_BENCH_DELTA_MERGE_COUNT=100
+DELTA_BENCH_ROWSET_NUM=4
+DELTA_BENCH_ROWSET_TRIGGER_PERCENT=60
+DELTA_BENCH_DELTA_MERGE_COUNT=10
 
 DB_BASE="$OUTPUT_DIR/tmp"
 DB_DIR_LEVELED="$DB_BASE/leveled"
@@ -110,10 +110,11 @@ mixgraph_hotspot_flags=(
 )
 
 delta_flags=(
-  "--delta_max_partitions=16"
-  "--delta_partition_split_growth_threshold=1.1"
-  "--delta_partition_merge_growth_threshold=0.9"
+  "--delta_max_partitions=4" # 4/2=2
+  "--delta_partition_split_growth_threshold=1.5"
+  "--delta_partition_merge_growth_threshold=0.5"
   "--delta_partition_target_file_size=$TARGET_FILE_SIZE"
+  "--delta_partition_file_num_compaction_trigger=3"
 )
 
 delta_bench_flags=(
