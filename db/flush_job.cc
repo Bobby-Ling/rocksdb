@@ -950,6 +950,38 @@ Status FlushJob::WriteLevel0Table() {
         const auto& delta_opts = mutable_cf_options_.compaction_options_delta;
         const uint32_t max_parts = std::max(1u, delta_opts.max_partitions);
         assert(current_pt != nullptr);
+        table_properties_ = TableProperties();
+
+        auto accumulate_table_properties = [](TableProperties* dst,
+                                              const TableProperties& src) {
+          dst->data_size += src.data_size;
+          dst->index_size += src.index_size;
+          dst->filter_size += src.filter_size;
+          dst->raw_key_size += src.raw_key_size;
+          dst->raw_value_size += src.raw_value_size;
+          dst->num_data_blocks += src.num_data_blocks;
+          dst->num_entries += src.num_entries;
+          dst->num_deletions += src.num_deletions;
+          dst->num_merge_operands += src.num_merge_operands;
+          dst->num_range_deletions += src.num_range_deletions;
+        };
+
+        auto build_partition_stats = [](const TableProperties& tp,
+                                        uint64_t point_entries,
+                                        bool has_output) {
+          PartitionStats stats;
+          stats.growth_rate = static_cast<int64_t>(point_entries);
+          stats.flush_count = 1;
+          stats.file_count = has_output ? 1 : 0;
+          stats.point_entries = point_entries;
+          stats.total_entries = tp.num_entries;
+          stats.point_deletions = tp.num_deletions;
+          stats.range_deletions = tp.num_range_deletions;
+          stats.raw_key_size = tp.raw_key_size;
+          stats.raw_value_size = tp.raw_value_size;
+          stats.data_size = tp.data_size;
+          return stats;
+        };
 
         std::vector<PartitionInfo> partitions;
         if (!current_pt->IsInitialized()) {
@@ -1046,6 +1078,7 @@ Status FlushJob::WriteLevel0Table() {
           uint64_t part_entries = 0;
           uint64_t part_point_entries = 0;
           IOStatus part_io_s;
+          TableProperties part_table_properties;
 
           TableBuilderOptions part_tbo(
               *cfd_->ioptions(), mutable_cf_options_,
@@ -1066,7 +1099,7 @@ Status FlushJob::WriteLevel0Table() {
               cfd_->internal_stats(), &part_io_s, io_tracer_,
               BlobFileCreationReason::kFlush, seqno_to_time_mapping_,
               event_logger_, job_context_->job_id, io_priority,
-              &table_properties_, write_hint, full_history_ts_low,
+              &part_table_properties, write_hint, full_history_ts_low,
               blob_callback_, &part_entries, &memtable_payload_bytes,
               &memtable_garbage_bytes, lb_ptr ? &lb_ikey : nullptr,
               ub_ptr ? &ub_ikey : nullptr, &part_point_entries);
@@ -1076,8 +1109,12 @@ Status FlushJob::WriteLevel0Table() {
           num_input_entries += part_entries;
           num_point_entries += part_point_entries;
           if (s.ok()) {
-            pt_edits->UpdatePartitionKeyCount(partition.partition_id,
-                                               static_cast<size_t>(part_entries));
+            const bool has_part_output = part_meta.fd.GetFileSize() > 0;
+            pt_edits->UpdatePartitionStats(
+                partition.partition_id,
+                build_partition_stats(part_table_properties, part_point_entries,
+                                      has_part_output));
+            accumulate_table_properties(&table_properties_, part_table_properties);
           }
 
           if (s.ok() && part_meta.fd.GetFileSize() > 0) {

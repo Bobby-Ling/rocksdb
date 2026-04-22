@@ -29,7 +29,7 @@ PartitionInfo PartitionTable::BuildPartitionInfo(
 }
 
 void PartitionTable::EraseGrowthIndex(PartitionTableStorage::iterator pm_it) {
-  int64_t rate = pm_it->second.growth_rate;
+  int64_t rate = pm_it->second.stats.growth_rate;
   auto [gr_begin, gr_end] = growth_rate_index.equal_range(rate);
   for (auto gr_it = gr_begin; gr_it != gr_end; ++gr_it) {
     if (gr_it->second == pm_it) {
@@ -96,7 +96,6 @@ PartitionID PartitionTable::InitFirstPartition() {
 
   PartitionID pid = next_partition_id_++;
   PartitionInfo info;
-  info.growth_rate = 0;
   info.partition_id = pid;
   info.left_bound = std::nullopt;
   auto [it, inserted] =
@@ -115,7 +114,6 @@ PartitionID PartitionTable::AddPartition(const std::string& left_bound) {
 
   PartitionID pid = next_partition_id_++;
   PartitionInfo info;
-  info.growth_rate = 0;
   info.partition_id = pid;
   info.left_bound = left_bound;
   auto [it, inserted] = partition_storage.emplace(left_bound, std::move(info));
@@ -134,12 +132,13 @@ void PartitionTable::RemovePartition(PartitionID pid) {
   partition_storage.erase(id_it);
 }
 
-void PartitionTable::UpdateGrowthRate(PartitionID pid, int64_t new_rate) {
+void PartitionTable::UpdateStats(PartitionID pid,
+                                 const PartitionStats& new_stats) {
   auto id_it = FindByPid(pid);
   assert(id_it != partition_storage.end());
   EraseGrowthIndex(id_it);
-  id_it->second.growth_rate = new_rate;
-  growth_rate_index.emplace(new_rate, id_it);
+  id_it->second.stats = new_stats;
+  growth_rate_index.emplace(new_stats.growth_rate, id_it);
 }
 
 PartitionInfo PartitionTable::GetLowestGrowthPartition() const {
@@ -191,7 +190,7 @@ std::string PartitionTable::DebugString() const {
     first = false;
 
     const PartitionInfo info = BuildPartitionInfo(it);
-    oss << "{pid=" << info.partition_id << " growth=" << info.growth_rate
+    oss << "{pid=" << info.partition_id << " stats=" << info.stats.DebugString()
         << " range=["
         << (info.left_bound.has_value() ? info.left_bound.value()
                                         : std::string("-INF"))
@@ -227,7 +226,7 @@ std::optional<PartitionTable::SplitPlan> PartitionTable::GetSplitPlan() const {
     return std::nullopt;
   }
   int64_t total = 0;
-  for (const auto& kv : partition_storage) total += kv.second.growth_rate;
+  for (const auto& kv : partition_storage) total += kv.second.stats.growth_rate;
   int64_t avg = total / static_cast<int64_t>(partition_storage.size());
   if (avg <= 0) return std::nullopt;
 
@@ -263,15 +262,17 @@ void PartitionTable::Split(PartitionID pid, const std::string& new_boundary) {
     return;
   }
 
-  int64_t old_rate = curr->second.growth_rate;
-  int64_t half_rate = old_rate / 2;
+  PartitionStats old_stats = curr->second.stats;
+  PartitionStats right_stats = old_stats * 0.5;
+  PartitionStats left_stats = old_stats;
+  left_stats -= right_stats;
 
   PartitionID new_pid = AddPartition(new_boundary);
   if (new_pid == kInvalidPartitionID) {
     return;
   }
-  UpdateGrowthRate(pid, old_rate - half_rate);
-  UpdateGrowthRate(new_pid, half_rate);
+  UpdateStats(pid, left_stats);
+  UpdateStats(new_pid, right_stats);
 }
 
 std::optional<PartitionTable::MergePlan> PartitionTable::GetMergePlan() const {
@@ -279,7 +280,7 @@ std::optional<PartitionTable::MergePlan> PartitionTable::GetMergePlan() const {
     return std::nullopt;
   }
   int64_t total = 0;
-  for (const auto& kv : partition_storage) total += kv.second.growth_rate;
+  for (const auto& kv : partition_storage) total += kv.second.stats.growth_rate;
   int64_t avg = total / static_cast<int64_t>(partition_storage.size());
   if (avg <= 0) return std::nullopt;
 
@@ -313,8 +314,8 @@ void PartitionTable::Merge(PartitionID left_pid, PartitionID right_pid) {
   assert(right_it != partition_storage.end());
   assert(std::next(left_it) == right_it);
 
-  int64_t merged_rate =
-      left_it->second.growth_rate + right_it->second.growth_rate;
+  PartitionStats merged_stats = right_it->second.stats;
+  merged_stats += left_it->second.stats;
 
   const auto new_left = left_it->first;
 
@@ -326,20 +327,20 @@ void PartitionTable::Merge(PartitionID left_pid, PartitionID right_pid) {
   auto right_node = partition_storage.extract(right_it);
   right_node.key() = new_left;
   right_node.mapped().left_bound = new_left;
-  right_node.mapped().growth_rate = merged_rate;
+  right_node.mapped().stats = merged_stats;
 
   partition_storage.erase(left_it);
 
   auto insert_result = partition_storage.insert(std::move(right_node));
   auto new_it = insert_result.position;
   pid_index[right_pid] = new_it;
-  growth_rate_index.emplace(merged_rate, new_it);
+  growth_rate_index.emplace(merged_stats.growth_rate, new_it);
 }
 
 PartitionTable::CompactionType PartitionTable::NeedCompaction() const {
   int64_t pt_total = 0;
   for (const auto& kv : partition_storage) {
-    pt_total += kv.second.growth_rate;
+    pt_total += kv.second.stats.growth_rate;
   }
   if (NumPartitions() < 2) {
     return CompactionType::kNone;
@@ -374,15 +375,12 @@ std::shared_ptr<PartitionTable> PartitionTable::ApplyToNewTable(
       auto update =
           std::static_pointer_cast<PartitionTableEdits::PartitionUpdate>(edit);
       PartitionID pid = update->pid;
-      int64_t key_count = static_cast<int64_t>(update->key_count);
       // 此时可能已经Compaction了, pid可能不存在
       auto partition = new_pt->GetPartition(pid);
       if (partition != std::nullopt) {
-        int64_t old_rate = partition->growth_rate;
-        int64_t new_rate = old_rate + key_count;
-        if (old_rate != new_rate) {
-          new_pt->UpdateGrowthRate(pid, new_rate);
-        }
+        PartitionStats new_stats = partition->stats;
+        new_stats += update->stats;
+        new_pt->UpdateStats(pid, new_stats);
       }
     } else if (edit->type == PartitionTableEdits::Edit::Type::kInit) {
       auto init =

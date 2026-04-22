@@ -3486,8 +3486,8 @@ std::string VersionStorageInfo::DeltaDebugString() const {
     const auto files = GetFilesInPartition(pid);
     out.append("  partition pid=");
     out.append(std::to_string(pid));
-    out.append(" growth=");
-    out.append(std::to_string(partition_info.growth_rate));
+    out.append(" stats: ");
+    out.append(partition_info.stats.DebugString());
     out.append(" left=[");
     if (partition_info.left_bound.has_value()) {
       out.append(Slice(partition_info.left_bound.value()).ToString(true));

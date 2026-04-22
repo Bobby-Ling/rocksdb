@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdint>
 #include <list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -16,15 +17,101 @@
 namespace ROCKSDB_NAMESPACE {
 using PartitionID = int64_t;
 static constexpr PartitionID kInvalidPartitionID = -1;
+
+struct PartitionStats {
+  int64_t growth_rate = 0;
+  uint64_t flush_count = 0;
+  uint64_t file_count = 0;
+  uint64_t point_entries = 0;
+  uint64_t total_entries = 0;
+  uint64_t point_deletions = 0;
+  uint64_t range_deletions = 0;
+  uint64_t raw_key_size = 0;
+  uint64_t raw_value_size = 0;
+  uint64_t data_size = 0;
+
+  PartitionStats& operator+=(const PartitionStats& other) {
+    growth_rate += other.growth_rate;
+    flush_count += other.flush_count;
+    file_count += other.file_count;
+    point_entries += other.point_entries;
+    total_entries += other.total_entries;
+    point_deletions += other.point_deletions;
+    range_deletions += other.range_deletions;
+    raw_key_size += other.raw_key_size;
+    raw_value_size += other.raw_value_size;
+    data_size += other.data_size;
+    return *this;
+  }
+
+  PartitionStats& operator-=(const PartitionStats& other) {
+    growth_rate -= other.growth_rate;
+    flush_count -= other.flush_count;
+    file_count -= other.file_count;
+    point_entries -= other.point_entries;
+    total_entries -= other.total_entries;
+    point_deletions -= other.point_deletions;
+    range_deletions -= other.range_deletions;
+    raw_key_size -= other.raw_key_size;
+    raw_value_size -= other.raw_value_size;
+    data_size -= other.data_size;
+    return *this;
+  }
+
+  PartitionStats operator*(double ratio) const {
+    PartitionStats scaled;
+    scaled.growth_rate = static_cast<int64_t>(growth_rate * ratio);
+    scaled.flush_count = static_cast<uint64_t>(flush_count * ratio);
+    scaled.file_count = static_cast<uint64_t>(file_count * ratio);
+    scaled.point_entries = static_cast<uint64_t>(point_entries * ratio);
+    scaled.total_entries = static_cast<uint64_t>(total_entries * ratio);
+    scaled.point_deletions = static_cast<uint64_t>(point_deletions * ratio);
+    scaled.range_deletions = static_cast<uint64_t>(range_deletions * ratio);
+    scaled.raw_key_size = static_cast<uint64_t>(raw_key_size * ratio);
+    scaled.raw_value_size = static_cast<uint64_t>(raw_value_size * ratio);
+    scaled.data_size = static_cast<uint64_t>(data_size * ratio);
+    return scaled;
+  }
+
+  uint64_t RawBytes() const { return raw_key_size + raw_value_size; }
+
+  std::string DebugString() const {
+    return "PartitionStats{growth_rate=" + std::to_string(growth_rate) +
+           ", flush_count=" + std::to_string(flush_count) +
+           ", file_count=" + std::to_string(file_count) +
+           ", point_entries=" + std::to_string(point_entries) +
+           ", total_entries=" + std::to_string(total_entries) +
+           ", point_deletions=" + std::to_string(point_deletions) +
+           ", range_deletions=" + std::to_string(range_deletions) +
+           ", raw_key_size=" + std::to_string(raw_key_size) +
+           ", raw_value_size=" + std::to_string(raw_value_size) +
+           ", data_size=" + std::to_string(data_size) + "}";
+  }
+};
+
+YLT_REFL(PartitionStats, growth_rate, flush_count, file_count, point_entries,
+         total_entries, point_deletions, range_deletions, raw_key_size,
+         raw_value_size, data_size);
+
 // [-INF, k1), [k1, k2), ..., [kn, +INF)
 // 只存boundaries会使得分区信息不好处理;
 struct PartitionInfo {
-  int64_t growth_rate = 0;
+  PartitionStats stats;
   PartitionID partition_id = kInvalidPartitionID;
   std::optional<std::string> left_bound;
   // right_bound is derived dynamically from the next left boundary.
   std::optional<std::string> right_bound;
+
+  std::string DebugString() const {
+    std::string out = "PartitionInfo{partition_id=";
+    out.append(std::to_string(partition_id));
+    out.append(", stats=" + stats.DebugString());
+    out.append("}");
+    return out;
+  }
 };
+
+YLT_REFL(PartitionInfo, stats, partition_id, left_bound, right_bound);
 
 class PartitionTableEdits;
 
@@ -206,15 +293,15 @@ class PartitionTable {
     growth_rate_index.clear();
     pid_index.clear();
     for (auto it = partition_storage.begin(); it != partition_storage.end(); ++it) {
-      growth_rate_index.emplace(it->second.growth_rate, it);
+      growth_rate_index.emplace(it->second.stats.growth_rate, it);
       pid_index.emplace(it->second.partition_id, it);
     }
   }
   // Remove partition identified by pid.
   void RemovePartition(PartitionID pid);
 
-  // Update the growth_rate of partition pid. Maintains index consistency.
-  void UpdateGrowthRate(PartitionID pid, int64_t new_rate);
+  // Update the stats of partition pid. Maintains index consistency.
+  void UpdateStats(PartitionID pid, const PartitionStats& new_stats);
   PartitionTableStorage::iterator FindByPid(PartitionID pid);
   PartitionTableStorage::const_iterator FindByPid(PartitionID pid) const;
 
@@ -223,10 +310,10 @@ class PartitionTable {
 
   void EraseGrowthIndex(PartitionTableStorage::iterator pm_it);
 
-  // 执行拆分：在 new_boundary 处创建新分区，将 pid 的 growth_rate 均分。
+  // 执行拆分：在 new_boundary 处创建新分区，将 pid 的 stats 近似均分。
   void Split(PartitionID pid, const std::string& new_boundary);
 
-  // 执行合并：删除 left_pid，将其 growth_rate 合并到 right_pid。
+  // 执行合并：删除 left_pid，将其 stats 合并到 right_pid。
   void Merge(PartitionID left_pid, PartitionID right_pid);
 };
 
@@ -252,9 +339,9 @@ class PartitionTableEdits {
   };
   struct PartitionUpdate : Edit {
     PartitionID pid;
-    std::size_t key_count;
-    PartitionUpdate(PartitionID pid, std::size_t key_count)
-        : Edit(Type::kPartitionUpdate), pid(pid), key_count(key_count) {}
+    PartitionStats stats;
+    PartitionUpdate(PartitionID pid, PartitionStats stats)
+      : Edit(Type::kPartitionUpdate), pid(pid), stats(std::move(stats)) {}
   };
   struct InitPartitionTable : Edit {
     std::shared_ptr<PartitionTable> pt;
@@ -262,9 +349,9 @@ class PartitionTableEdits {
         : Edit(Type::kInit), pt(std::move(pt)) {}
   };
 
-  // Flush时迭代分区, 获取本次flush的Key数目, 并在edit_中记录分区表更新
-  void UpdatePartitionKeyCount(PartitionID pid, std::size_t key_count) {
-    edites_.push_back(std::make_shared<PartitionUpdate>(pid, key_count));
+  // Flush时按分区收集统计信息，并在 edit_ 中记录分区表更新。
+  void UpdatePartitionStats(PartitionID pid, const PartitionStats& stats) {
+    edites_.push_back(std::make_shared<PartitionUpdate>(pid, stats));
   }
 
   void AddSplit(const SplitPlan& plan, const std::string& new_boundary) {
