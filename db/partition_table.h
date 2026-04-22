@@ -162,20 +162,18 @@ class PartitionTable {
     PartitionID right_pid;
   };
   PartitionTable() = default;
-  PartitionTable(uint32_t max_partitions,
-                          double split_grouth_threshold,
+  PartitionTable(uint32_t max_partitions, double split_grouth_threshold,
                           double merge_growth_threshold,
-                          uint32_t partition_file_num_compaction_trigger =
-                              std::numeric_limits<uint32_t>::max())
+                 uint32_t file_num_compaction_trigger)
       : max_partitions_(max_partitions),
         split_growth_threshold_(split_grouth_threshold),
         merge_growth_threshold_(merge_growth_threshold),
-        partition_file_num_compaction_trigger_(
-            partition_file_num_compaction_trigger) {}
+        file_num_compaction_trigger_(
+            file_num_compaction_trigger) {}
   PartitionTable(const PartitionTable& other)
       : PartitionTable(other.max_partitions_, other.split_growth_threshold_,
                        other.merge_growth_threshold_,
-                       other.partition_file_num_compaction_trigger_) {
+                       other.file_num_compaction_trigger_) {
     next_partition_id_ = other.next_partition_id_;
     partition_storage = other.partition_storage;
     // growth_rate_index = other.growth_rate_index;
@@ -200,13 +198,12 @@ class PartitionTable {
 
   void SetOptions(uint32_t max_partitions, double split_grouth_threshold,
                   double merge_growth_threshold,
-                  uint32_t partition_file_num_compaction_trigger =
-                      std::numeric_limits<uint32_t>::max()) {
+                  uint32_t file_num_compaction_trigger) {
     this->max_partitions_ = max_partitions;
     this->split_growth_threshold_ = split_grouth_threshold;
     this->merge_growth_threshold_ = merge_growth_threshold;
-    this->partition_file_num_compaction_trigger_ =
-        partition_file_num_compaction_trigger;
+    this->file_num_compaction_trigger_ =
+        file_num_compaction_trigger;
   };
 
  private:
@@ -227,7 +224,7 @@ class PartitionTable {
   // Trigger intra-partition compaction when a partition's file_count reaches
   // this threshold. Defaults to max (disabled). Set via SetOptions() at
   // runtime from level0_file_num_compaction_trigger or dedicated option.
-  uint32_t partition_file_num_compaction_trigger_ =
+  uint32_t file_num_compaction_trigger_ =
       std::numeric_limits<uint32_t>::max();
 
   using PartitionTableStorage =

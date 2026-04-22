@@ -28,7 +28,8 @@ std::shared_ptr<PartitionTable> NewEmptyPartitionTable(ColumnFamilyData* cfd) {
   return std::make_shared<PartitionTable>(
       delta_options.max_partitions,
       delta_options.partition_split_growth_threshold,
-      delta_options.partition_merge_growth_threshold);
+      delta_options.partition_merge_growth_threshold,
+      delta_options.partition_file_num_compaction_trigger);
 }
 
 Status ApplyPartitionTableState(const VersionEdit& edit, ColumnFamilyData* cfd,

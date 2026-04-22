@@ -1089,6 +1089,22 @@ void MutableCFOptions::Dump(Logger* log) const {
   ROCKS_LOG_INFO(log, "compaction_options_fifo.allow_compaction : %d",
                  compaction_options_fifo.allow_compaction);
 
+  // Delta Compaction Options
+  ROCKS_LOG_INFO(log, "compaction_options_delta.max_partitions: %d",
+                 compaction_options_delta.max_partitions);
+  ROCKS_LOG_INFO(
+      log, "compaction_options_delta.partition_split_growth_threshold: %f",
+      compaction_options_delta.partition_split_growth_threshold);
+  ROCKS_LOG_INFO(
+      log, "compaction_options_delta.partition_merge_growth_threshold: %f",
+      compaction_options_delta.partition_merge_growth_threshold);
+  ROCKS_LOG_INFO(
+      log, "compaction_options_delta.partition_target_file_size: %" PRIu64,
+      compaction_options_delta.partition_target_file_size);
+  ROCKS_LOG_INFO(
+      log, "compaction_options_delta.partition_file_num_compaction_trigger: %d",
+      compaction_options_delta.partition_file_num_compaction_trigger);
+
   // Blob file related options
   ROCKS_LOG_INFO(log, "                        enable_blob_files: %s",
                  enable_blob_files ? "true" : "false");
