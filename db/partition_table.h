@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "rocksdb/rocksdb_namespace.h"
@@ -125,6 +126,7 @@ class PartitionTable {
     enum class Type : uint8_t { kSplit, kMerge, kPartition };
     explicit Plan(Type type) : type(type) {}
     virtual ~Plan() = default;
+    virtual std::unordered_set<PartitionID> GetBusyPartitions() const = 0;
     virtual std::string DebugString() const = 0;
     Type type;
   };
@@ -134,6 +136,9 @@ class PartitionTable {
   struct PartitionCompactionPlan : Plan {
     PartitionCompactionPlan() : Plan(Type::kPartition) {}
     ~PartitionCompactionPlan() override = default;
+    std::unordered_set<PartitionID> GetBusyPartitions() const override {
+      return {pid};
+    }
     std::string DebugString() const override {
       return "PartitionCompactionPlan{pid=" + std::to_string(pid) + "}";
     }
@@ -143,6 +148,9 @@ class PartitionTable {
   struct SplitPlan : Plan {
     SplitPlan() : Plan(Type::kSplit) {}
     ~SplitPlan() override = default;
+    std::unordered_set<PartitionID> GetBusyPartitions() const override {
+      return {pid};
+    }
     std::string DebugString() const override {
       return "SplitPlan{pid=" + std::to_string(pid) + "}";
     }
@@ -154,6 +162,9 @@ class PartitionTable {
   struct MergePlan : Plan {
     MergePlan() : Plan(Type::kMerge) {}
     ~MergePlan() override = default;
+    std::unordered_set<PartitionID> GetBusyPartitions() const override {
+      return {left_pid, right_pid};
+    }
     std::string DebugString() const override {
       return "MergePlan{left_pid=" + std::to_string(left_pid) +
              ", right_pid=" + std::to_string(right_pid) + "}";
@@ -163,7 +174,7 @@ class PartitionTable {
   };
   PartitionTable() = default;
   PartitionTable(uint32_t max_partitions, double split_grouth_threshold,
-                          double merge_growth_threshold,
+                 double merge_growth_threshold,
                  uint32_t file_num_compaction_trigger)
       : max_partitions_(max_partitions),
         split_growth_threshold_(split_grouth_threshold),
@@ -276,20 +287,21 @@ class PartitionTable {
   // Returns a compact, human-readable snapshot for debugging.
   std::string DebugString() const;
 
-  std::shared_ptr<Plan> GetCompactionPlan() const {
-    auto compaction_type = NeedCompaction();
+  std::shared_ptr<Plan> GetCompactionPlan(
+      const std::unordered_set<PartitionID>& excluded = {}) const {
+    auto compaction_type = NeedCompaction(excluded);
     if (compaction_type == CompactionType::kPartition) {
-      auto plan = GetPartitionCompactionPlan();
+      auto plan = GetPartitionCompactionPlan(excluded);
       if (plan) {
         return std::make_shared<PartitionCompactionPlan>(*plan);
       }
     } else if (compaction_type == CompactionType::kSplit) {
-      auto split_plan = GetSplitPlan();
+      auto split_plan = GetSplitPlan(excluded);
       if (split_plan) {
         return std::make_shared<SplitPlan>(*split_plan);
       }
     } else if (compaction_type == CompactionType::kMerge) {
-      auto merge_plan = GetMergePlan();
+      auto merge_plan = GetMergePlan(excluded);
       if (merge_plan) {
         return std::make_shared<MergePlan>(*merge_plan);
       }
@@ -297,23 +309,33 @@ class PartitionTable {
     return nullptr;
   }
 
-  // 若存在 file_count >= partition_file_num_compaction_trigger_ 的分区，
-  // 则返回 file_count 最大的那个。
-  std::optional<PartitionCompactionPlan> GetPartitionCompactionPlan() const;
+  // 若存在 file_count >= file_num_compaction_trigger_ 的分区，
+  // 则返回 file_count 最大的那个。excluded 中的分区会被跳过。
+  std::optional<PartitionCompactionPlan> GetPartitionCompactionPlan(
+      const std::unordered_set<PartitionID>& excluded = {}) const;
 
   // 若存在超过 split_thresh 的分区且当前总分区数 < max_parts，则返回候选。
-  std::optional<SplitPlan> GetSplitPlan() const;
+  // excluded 中的分区会被跳过。
+  std::optional<SplitPlan> GetSplitPlan(
+      const std::unordered_set<PartitionID>& excluded = {}) const;
 
   // 若存在低于 merge_thresh 的分区，则返回相邻两个合并候选。
-  std::optional<MergePlan> GetMergePlan() const;
+  // excluded 中的分区（及其相邻候选）会被跳过。
+  std::optional<MergePlan> GetMergePlan(
+      const std::unordered_set<PartitionID>& excluded = {}) const;
 
+  // NOTE: kPartition must have the highest numeric value so that
+  // ComputeCompactionScore() returns the largest score when intra-partition
+  // compaction is needed (higher score = higher priority).
   enum class CompactionType : uint8_t {
     kNone = 0,
     kMerge = 1,
     kSplit = 2,
     kPartition = 3
   };
-  CompactionType NeedCompaction() const;
+  // excluded: 正在 compaction 的分区 ID 集合，这些分区在本次选择中会被跳过。
+  CompactionType NeedCompaction(
+      const std::unordered_set<PartitionID>& excluded = {}) const;
   double ComputeCompactionScore() const {
     return static_cast<double>(NeedCompaction());
   }

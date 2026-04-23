@@ -18,6 +18,18 @@ namespace ROCKSDB_NAMESPACE {
 
 using ROCKSDB_UNIVERSAL_COMPACTION_BUILDER::UniversalCompactionBuilder;
 
+std::unordered_set<PartitionID> DeltaCompactionPicker::CollectBusyPartitions()
+    const {
+  std::unordered_set<PartitionID> busy;
+  for (const Compaction* c : compactions_in_progress_) {
+    const auto& plan = c->GetCompactionPlan();
+    if (!plan) continue;
+    auto plan_busy = plan->GetBusyPartitions();
+    busy.insert(plan_busy.begin(), plan_busy.end());
+  }
+  return busy;
+}
+
 bool DeltaCompactionPicker::NeedsCompaction(
     const VersionStorageInfo* vstorage) const {
   // Score is set by VersionStorageInfo::ComputeCompactionScore for Delta style.
@@ -25,8 +37,9 @@ bool DeltaCompactionPicker::NeedsCompaction(
   if (!pt || !pt->IsInitialized()) {
     return false;
   }
+  auto busy = CollectBusyPartitions();
   bool needs_compaction =
-      pt->NeedCompaction() != PartitionTable::CompactionType::kNone;
+      pt->NeedCompaction(busy) != PartitionTable::CompactionType::kNone;
   ROCKS_LOG_INFO(ioptions_.info_log,
                  "DeltaCompactionPicker::NeedsCompaction() returns %d",
                  needs_compaction);
@@ -44,7 +57,7 @@ Compaction* DeltaCompactionPicker::PickCompaction(
     return nullptr;
   }
 
-  auto plan = pt->GetCompactionPlan();
+  auto plan = pt->GetCompactionPlan(CollectBusyPartitions());
   if (plan == nullptr) {
     return nullptr;
   }

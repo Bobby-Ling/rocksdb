@@ -22,6 +22,12 @@ class DeltaCompactionPicker : public CompactionPicker {
   bool NeedsCompaction(const VersionStorageInfo* vstorage) const override;
 
   int MaxOutputLevel() const override { return 0; }
+
+ private:
+  // Collects the set of PartitionIDs currently involved in in-progress
+  // compactions, derived from compactions_in_progress_.
+  // Must be called under the DB mutex.
+  std::unordered_set<PartitionID> CollectBusyPartitions() const;
 };
 
 }  // namespace ROCKSDB_NAMESPACE
