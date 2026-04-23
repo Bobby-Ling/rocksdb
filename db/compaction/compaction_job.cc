@@ -2026,8 +2026,11 @@ void CompactionJob::LogCompaction() {
     stream << "job" << job_id_ << "event"
            << "compaction_started"
            << "compaction_reason"
-           << GetCompactionReasonString(compaction->compaction_reason())
-           << (compaction->GetCompactionPlan() ? compaction->GetCompactionPlan()->DebugString() : "");
+           << GetCompactionReasonString(compaction->compaction_reason());
+    if (compaction->GetCompactionPlan()) {
+      stream << "compaction_plan"
+             << compaction->GetCompactionPlan()->DebugString();
+    }
     for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
       stream << ("files_L" + std::to_string(compaction->level(i)));
       stream.StartArray();
