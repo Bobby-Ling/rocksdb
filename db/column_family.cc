@@ -289,7 +289,7 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
     result.num_levels = 1;
     result.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
     result.level0_stop_writes_trigger = std::numeric_limits<int>::max();
-    result.level0_file_num_compaction_trigger *= result.compaction_options_delta.max_partitions;
+    result.level0_file_num_compaction_trigger = result.compaction_options_delta.partition_file_num_compaction_trigger;
   }
 
   if (result.max_bytes_for_level_multiplier <= 0) {
