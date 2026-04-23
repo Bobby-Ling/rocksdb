@@ -117,3 +117,44 @@ row_id作为Key, 随机读写; 将其分N个区, 每个分区内达到一定比�
 - VersionEdit
     - Flush和Compaction可能并发执行, 通过VersionEdit将文件更改在LogAndApply中原子生效(类似commit)
     - Flush仅修改统计数据, 允许不准确
+
+TODO:
+- [x] 目标负载测试
+- [x] 分区内小SST多，需要Compaction机制
+- [x] 分区统计信息（growth/...）需要重新设计，并相应更新CompactionPicker机制
+
+还需要怎样的Compaction机制
+- 分区内使用仅L0下的Universal
+
+存在的问题及拟采取的办法:
+- [x] 目前Compaction尚未实现完全, 分区后每个分区内存在大量小文件, 计划通过在每个分区内执行原RocksDB的Universal Compaction进行合并
+- [ ] 分区的合并拆分目前仅使用分区增长率衡量(单位时间内数据增量), 计划添加更加详细的分区内统计数据, 并根据后续实验效果调整分区的合并拆分的策略.
+
+TODO, 关于Range Delete:
+- [ ] L0 Range Delete Tombstone GC 
+- [x] Range Tombstone Flush时并未裁剪到分区范围
+- [ ] 当Range Delete覆盖整个分区时->参考FIFO Compaction, 执行Delete Compaction
+
+关于CompactionPicker
+- Compaction Score
+- FilesMarkedForCompaction / IntTblPropCollector / CompactOnDeletionCollector
+- Delete Compaction
+- CompactRange
+
+目前进度
+- 已经完成分区内的UniversalCompactionBuilder
+- 目前各分区是串行pick的, 即一次Picker仅生成一次Compaction对象
+
+目标负载下, Split和Merge基本不会出现, 主要是分区内Universal Compaction, 添加`partition_file_num_compaction_trigger=4`
+
+UniversalCompactionPicker在L0选取的都是连续的文件
+
+TODO
+- [ ] RangeDelete覆盖整个分区时, 直接Mark For Compaction/Delete, 并将此分区和相邻分区合并
+- [ ] RangeDelete覆盖部分分区时
+- [ ] 目前DeltaPicker是直接用了UniversalCompactionBuilder, 后面肯定是要复制一份DeltaBuilder然后在上面定制的
+
+TODO
+- [x] fix Leveled bug
+- [ ] 正确性测试
+- [ ] Increasing compaction threads because we have 17 level-0 files 
