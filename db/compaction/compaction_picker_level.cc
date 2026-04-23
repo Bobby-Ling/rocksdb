@@ -58,6 +58,7 @@ class LevelCompactionBuilder {
                          const MutableDBOptions& mutable_db_options)
       : cf_name_(cf_name),
         vstorage_(vstorage),
+        vstorage_view_(std::make_shared<VersionStorageInfoView>(vstorage)),
         earliest_mem_seqno_(earliest_mem_seqno),
         compaction_picker_(compaction_picker),
         log_buffer_(log_buffer),
