@@ -577,10 +577,12 @@ DEFINE_uint64(delta_partition_target_file_size, 64 * 1048576,
               "Delta compaction: Target bytes per SST file within a partition "
               "(0 = no limit).");
 
-// partition_file_num_compaction_trigger
 DEFINE_uint32(delta_partition_file_num_compaction_trigger, 4,
               "Delta compaction: Trigger compaction when a partition has at least "
               "this many files.");
+
+DEFINE_bool(delta_enable_read_optimization, true,
+            "filter files by partition in L0 by lookup key");
 
 DEFINE_int64(delta_bench_rowset_num, 16,
              "Delta benchmark: Number of equal-sized rowsets spanning the "
@@ -4292,6 +4294,8 @@ class Benchmark {
           FLAGS_delta_partition_target_file_size;
       options.compaction_options_delta.partition_file_num_compaction_trigger =
           FLAGS_delta_partition_file_num_compaction_trigger;
+      options.compaction_options_delta.enable_read_optimization =
+          FLAGS_delta_enable_read_optimization;
       // Delta style requires num_levels=1 (L0 only)
       options.num_levels = 1;
     }

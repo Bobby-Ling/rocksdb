@@ -276,6 +276,10 @@ struct CompactionOptionsDelta {
   // Trigger intra-partition Universal compaction
   // Default: 4
   uint32_t partition_file_num_compaction_trigger = 4;
+
+  // filter files by partition in L0 by lookup key
+  // Defualt: true
+  bool enable_read_optimization = true;
 };
 
 struct AdvancedColumnFamilyOptions {

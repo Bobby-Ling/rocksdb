@@ -2120,8 +2120,31 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
     pinned_iters_mgr->StartPinning();
   }
 
-  FilePicker fp(user_key, ikey, &storage_info_.level_files_brief_,
-                storage_info_.num_non_empty_levels_,
+  // Delta mode: use VersionStorageInfoViewDelta to confine the search to files
+  // in the target partition, avoiding full L0 scan.
+  // The view is kept alive here so its mutable brief storage outlives FilePicker.
+  std::unique_ptr<VersionStorageInfoViewDelta> partition_view;
+  autovector<LevelFilesBrief> partition_brief_holder;
+  autovector<LevelFilesBrief>* briefs = &storage_info_.level_files_brief_;
+  int num_levels_for_fp = storage_info_.num_non_empty_levels_;
+  if (storage_info_.compaction_style_ ==
+      CompactionStyle::kCompactionStyleDelta && mutable_cf_options_.compaction_options_delta.enable_read_optimization) {
+    const auto* pt = storage_info_.GetPartitionTable().get();
+    if (pt && pt->IsInitialized()) {
+      const PartitionInfo pi = pt->FindPartition(user_key.ToString());
+      partition_view = std::make_unique<VersionStorageInfoViewDelta>(
+          &storage_info_,
+          std::unordered_set<PartitionID>{pi.partition_id});
+      // LevelFilesBrief(0) filters by partition_id; result points into
+      // partition_view's mutable storage which stays alive until end of scope.
+      const LevelFilesBrief& pb = partition_view->LevelFilesBrief(0);
+      partition_brief_holder.push_back(pb);
+      briefs = &partition_brief_holder;
+      num_levels_for_fp = 1;
+    }
+  }
+
+  FilePicker fp(user_key, ikey, briefs, num_levels_for_fp,
                 &storage_info_.file_indexer_, user_comparator(),
                 internal_comparator());
   FdWithKeyRange* f = fp.GetNextFile();

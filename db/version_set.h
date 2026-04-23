@@ -882,6 +882,26 @@ class VersionStorageInfoViewDelta : public VersionStorageInfoView {
     return level0_files_;
   }
 
+  const ROCKSDB_NAMESPACE::LevelFilesBrief& LevelFilesBrief(
+      int level) const override {
+    if (level != 0) {
+      static const ROCKSDB_NAMESPACE::LevelFilesBrief empty_brief;
+      return empty_brief;
+    }
+    const ROCKSDB_NAMESPACE::LevelFilesBrief& full =
+        vstorage_->LevelFilesBrief(0);
+    filtered_l0_entries_.clear();
+    for (size_t i = 0; i < full.num_files; i++) {
+      if (ContainsPartition(full.files[i].file_metadata->partition_id)) {
+        filtered_l0_entries_.push_back(full.files[i]);
+      }
+    }
+    filtered_l0_brief_.num_files = filtered_l0_entries_.size();
+    filtered_l0_brief_.files =
+        filtered_l0_entries_.empty() ? nullptr : filtered_l0_entries_.data();
+    return filtered_l0_brief_;
+  }
+
   const MarkedFiles& FilesMarkedForCompaction() const override {
     return empty_marked_files_;
   }
@@ -918,6 +938,8 @@ class VersionStorageInfoViewDelta : public VersionStorageInfoView {
 
   std::unordered_set<PartitionID> partition_ids_;
   mutable std::vector<FileMetaData*> level0_files_;
+  mutable std::vector<FdWithKeyRange> filtered_l0_entries_;
+  mutable ROCKSDB_NAMESPACE::LevelFilesBrief filtered_l0_brief_;
   MarkedFiles empty_marked_files_;
 };
 
