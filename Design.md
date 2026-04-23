@@ -157,4 +157,65 @@ TODO
 TODO
 - [x] fix Leveled bug
 - [ ] 正确性测试
-- [ ] Increasing compaction threads because we have 17 level-0 files 
+- [ ] `Increasing compaction threads because we have 17 level-0 files`
+
+TODO
+- [ ] DeltaBench中应该支持与其他分布使用
+
+目前典型的L0形态:
+- `delta_max_partitions/2`个分区
+- 每个分区`delta_partition_file_num_compaction_trigger`个SST(分区内Universal Compaction)
+
+RocksDB不同Compaction Style下(Universal/仅L0的Universal/FIFO/Leveled)中被RangeTombstone覆盖的Key在什么时候被实际清理?
+
+当Compaction输出文件是 "bottommost"时.
+这些场景下, 由于Range可能与任意SST重叠, 要将Range Tombstone和Key本身GC掉, 需要保证某次Compaction的输入SST中, 包含了所有该Range内能够覆盖的旧Key(), 即`!vstorage->RangeMightExistAfterSortedRun(inputs的覆盖Range)`.
+
+Range Delete Compaction
+- 典型情况下, 一次Range Delete可以完整覆盖多个分区, 并部分覆盖两个分区. 左右这两个分区最终也很可能被随后的Range Delete覆盖.
+- 考虑目前分区内的Universal Compaction, 怎样的输入能够是Bottom Most的, 即能GC掉Range TombStone覆盖的旧Key的?
+    ```sh
+    Partition{ Range:[a, z), SST:[ [xxxx], [xxxx], ..., [xxxx, RangeDelete{a, z}, xxxx], [xxxx] ] }
+    ...
+    ```
+    - 考虑被完整覆盖的分区: 选取RangeDelete的那个SST以及之前的所有SST
+    - 考虑未被完整覆盖的分区: 依然如此. 
+- 考虑本次Flush被完整覆盖的分区: 说明分区内Key已经很多了, Range Delete后这一段分区内Key会大幅减少, 应该直接Compaction, Compaction完后分区内应该仅剩下那次含有Range Delete的SST的新Key和后续的新SST.
+- 考虑被部分覆盖的分区: 同理. 区别仅在于执行RangeDeleteCompaction的阈值
+    ```sh
+    Partition{ Range:[a, z), SST:[ [xxxx], ..., [xxxx, RangeDelete{a, s}, xxxx], [xxxx], ..., [xxxx, RangeDelete{s, z}, xxxx] ] }
+    ...
+    ```
+    - 如何判断部分覆盖的Range TombStone覆盖了多少Key?
+        - 目前负载下可以直接等这个分区被多个RangeDelete完整覆盖, 暂时不用管这个
+    - 在`RangeDelete{s, z}`来的时候如何判断本分区已经被完整覆盖了?
+        - RangeDelete是很少的, 可以将某次Flush的时候可以拿整个分区的RangeDelete一起来判断(此处如何获取其他SST的墓碑信息?是否可以缓存到分区相关信息中?)
+            - 这里RangeDelete信息仅用于Compaction, 因此放在Version级别的PartitionTable中就行(Manifest持久化, 不需要WAL级别)
+- Compaction后分区Key数目发生变化, 交给后续进行Merge Split, 与Range Delete Compaction无关了.
+
+### 主要修改代码
+
+- `db/partition_table.cc` `db/partition_table.h`
+    - PartitionTable 分区表, 记录分区元数据和统计信息, 决策Merge/Split/分区内Compaction
+- `db/flush_job.cc`
+    - UpdatePartitionStats Flush时更新分区统计信息
+    - 拆分输入的mems输出到各个分区
+- `db/builder.cc`
+    - AddTombstones BuildTable中裁剪RangeTombStone到分区边界
+- `db/compaction/compaction_picker_delta.cc` `db/compaction/compaction_picker_delta.h` `db/compaction/compaction_picker_universal.cc` `db/compaction/compaction_picker_universal.h`
+    - UniversalCompactionPicker 将UniversalCompactionPicker用在DeltaCompactionPicker中
+    - DeltaCompactionPicker 转发到分区表获取是Merge/Split还是分区内Compaction
+- `db/compaction/compaction_job.cc`
+    - UpdatePartitionStats/AddMerge/AddSplit InstallCompactionResults中更新分区表Edits
+    - Split借助Subcompaction(max_subcompactions=2)实现
+- `db/version_set.cc` `db/version_set.h` `db/version_edit.cc` `db/version_edit.h`
+    - VersionStorageInfoViewDelta Delta下对于各个分区而言的L0视图, 当VersionStorageInfo用
+    - ApplyToNewTable 将PartitionTableEdits持久化到Manifest, Install时Apply到新的Version的分区表中
+- `db/version_edit_handler.cc`
+    - kPartitionTableSnapshot ApplyPartitionTableState 重启后恢复分区表
+- `tools/db_bench_tool.cc`
+    - Benchmark::DeltaBench 测试负载
+- `include/rocksdb/advanced_options.h`
+    - CompactionOptionsDelta 选项
+- `scripts/benchmark_delta_vs_level_db_bench.sh`
+    - dbbench deltabench 和Leveled对比的测试脚本
