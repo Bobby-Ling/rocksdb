@@ -27,6 +27,7 @@
 namespace ROCKSDB_NAMESPACE {
 
 struct FileMetaData;
+class PartitionTableEdits;
 
 class VersionSet;
 class BlobFileAddition;
@@ -75,6 +76,7 @@ extern Status BuildTable(
     uint64_t* memtable_garbage_bytes = nullptr,
     const InternalKey* smallest = nullptr,
     const InternalKey* largest = nullptr,
-    uint64_t* num_point_input_entries = nullptr);
+    uint64_t* num_point_input_entries = nullptr,
+    PartitionTableEdits* pt_edits = nullptr);
 
 }  // namespace ROCKSDB_NAMESPACE

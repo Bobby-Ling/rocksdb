@@ -85,6 +85,8 @@ const char* GetCompactionReasonString(CompactionReason compaction_reason) {
       return "DeltaSplit";
     case CompactionReason::kDeltaPartition:
       return "DeltaPartition";
+    case CompactionReason::kDeltaRangeDelete:
+      return "DeltaRangeDelete";
     case CompactionReason::kManualCompaction:
       return "ManualCompaction";
     case CompactionReason::kFilesMarkedForCompaction:
@@ -1642,6 +1644,12 @@ Status CompactionJob::InstallCompactionResults(
       if (!boundaries_.empty()) {
         pt_editor->AddSplit(*split_plan, boundaries_.front());
       }
+    } else if (plan->type == PartitionTable::Plan::Type::kRangeDelete) {
+      // Reset the accumulated coverage so the partition doesn't re-trigger.
+      auto rd_plan =
+          std::static_pointer_cast<PartitionTable::RangeDeleteCompactionPlan>(
+              plan);
+      pt_editor->AddPartitionCoverageReset(rd_plan->pid);
     }
     // Maintain file_count for all delta compaction plan;
     {
@@ -1872,6 +1880,11 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
             std::static_pointer_cast<PartitionTable::PartitionCompactionPlan>(
                 plan);
         meta.partition_id = partition_plan->pid;
+      } else if (plan->type == PartitionTable::Plan::Type::kRangeDelete) {
+        auto rd_plan =
+            std::static_pointer_cast<PartitionTable::RangeDeleteCompactionPlan>(
+                plan);
+        meta.partition_id = rd_plan->pid;
       }
     }
 

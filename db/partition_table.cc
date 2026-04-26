@@ -5,6 +5,84 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+namespace {
+// Compare start bounds: nullopt = -INF
+static int StartCmp(const KeyIntervalSet::Bound& a,
+                    const KeyIntervalSet::Bound& b) {
+  if (!a.has_value() && !b.has_value()) return 0;
+  if (!a.has_value()) return -1;
+  if (!b.has_value()) return 1;
+  return a->compare(*b);
+}
+// Compare end bounds: nullopt = +INF
+static int EndCmp(const KeyIntervalSet::Bound& a,
+                  const KeyIntervalSet::Bound& b) {
+  if (!a.has_value() && !b.has_value()) return 0;
+  if (!a.has_value()) return 1;   // +INF > anything
+  if (!b.has_value()) return -1;  // x < +INF
+  return a->compare(*b);
+}
+// end (treated as +INF if nullopt) >= start (treated as -INF if nullopt)
+static bool EndReachesStart(const KeyIntervalSet::Bound& end,
+                             const KeyIntervalSet::Bound& start) {
+  if (!end.has_value()) return true;    // +INF >= anything
+  if (!start.has_value()) return true;  // anything >= -INF
+  return *end >= *start;
+}
+}  // namespace
+
+void KeyIntervalSet::Add(const Bound& add_start, const Bound& add_end) {
+  Bound merged_start = add_start;
+  Bound merged_end = add_end;
+
+  std::vector<std::pair<Bound, Bound>> result;
+  result.reserve(intervals.size() + 1);
+
+  size_t i = 0;
+  // Copy intervals that end strictly before add_start (no overlap, no adjacent)
+  while (i < intervals.size() &&
+         !EndReachesStart(intervals[i].second, merged_start)) {
+    result.push_back(intervals[i++]);
+  }
+  // Merge all overlapping or adjacent intervals
+  while (i < intervals.size() &&
+         EndReachesStart(merged_end, intervals[i].first)) {
+    if (StartCmp(intervals[i].first, merged_start) < 0) {
+      merged_start = intervals[i].first;
+    }
+    if (EndCmp(intervals[i].second, merged_end) > 0) {
+      merged_end = intervals[i].second;
+    }
+    ++i;
+  }
+  result.emplace_back(merged_start, merged_end);
+  // Copy remaining intervals
+  while (i < intervals.size()) {
+    result.push_back(intervals[i++]);
+  }
+  intervals = std::move(result);
+}
+
+bool KeyIntervalSet::CoversAll(const Bound& left, const Bound& right) const {
+  for (const auto& iv : intervals) {
+    if (StartCmp(iv.first, left) <= 0 && EndCmp(iv.second, right) >= 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string KeyIntervalSet::DebugString() const {
+  std::string s = "[";
+  for (const auto& iv : intervals) {
+    s += "[" + (iv.first.has_value() ? *iv.first : "-INF") + "," +
+         (iv.second.has_value() ? *iv.second : "+INF") + ")";
+  }
+  s += "]";
+  return s;
+}
+
+
 PartitionTable::PartitionTableStorage::iterator PartitionTable::FindByPid(
     PartitionID pid) {
   auto it = pid_index.find(pid);
@@ -362,6 +440,11 @@ void PartitionTable::Merge(PartitionID left_pid, PartitionID right_pid) {
 
 PartitionTable::CompactionType PartitionTable::NeedCompaction(
     const std::unordered_set<PartitionID>& excluded) const {
+  // kRangeDelete has highest priority: GC tombstones first.
+  if (GetRangeDeletePlan(excluded).has_value()) {
+    return CompactionType::kRangeDelete;
+  }
+
   if (file_num_compaction_trigger_ !=
       std::numeric_limits<uint32_t>::max()) {
     for (const auto& kv : partition_storage) {
@@ -382,6 +465,27 @@ PartitionTable::CompactionType PartitionTable::NeedCompaction(
     return CompactionType::kMerge;
   }
   return CompactionType::kNone;
+}
+
+std::optional<PartitionTable::RangeDeleteCompactionPlan>
+PartitionTable::GetRangeDeletePlan(
+    const std::unordered_set<PartitionID>& excluded) const {
+  for (auto it = partition_storage.begin(); it != partition_storage.end();
+       ++it) {
+    const PartitionID pid = it->second.partition_id;
+    if (excluded.count(pid) != 0) continue;
+    if (it->second.covered_ranges.Empty()) continue;
+    // Compute right bound dynamically (not stored in partition_storage value)
+    auto next = std::next(it);
+    std::optional<std::string> right_bound =
+        (next == partition_storage.end()) ? std::nullopt : next->first;
+    if (it->second.covered_ranges.CoversAll(it->first, right_bound)) {
+      RangeDeleteCompactionPlan plan;
+      plan.pid = pid;
+      return plan;
+    }
+  }
+  return std::nullopt;
 }
 
 std::optional<PartitionTable::PartitionCompactionPlan>
@@ -438,6 +542,26 @@ std::shared_ptr<PartitionTable> PartitionTable::ApplyToNewTable(
       auto init =
           std::static_pointer_cast<PartitionTableEdits::InitPartitionTable>(edit);
       new_pt = init->pt;
+    } else if (edit->type ==
+               PartitionTableEdits::Edit::Type::kCoverageUpdate) {
+      auto update =
+          std::static_pointer_cast<PartitionTableEdits::PartitionCoverageUpdate>(
+              edit);
+      auto id_it = new_pt->FindByPid(update->pid);
+      if (id_it != new_pt->partition_storage.end()) {
+        for (const auto& [start, end] : update->ranges) {
+          id_it->second.covered_ranges.Add(start, end);
+        }
+      }
+    } else if (edit->type ==
+               PartitionTableEdits::Edit::Type::kCoverageReset) {
+      auto reset =
+          std::static_pointer_cast<PartitionTableEdits::PartitionCoverageReset>(
+              edit);
+      auto id_it = new_pt->FindByPid(reset->pid);
+      if (id_it != new_pt->partition_storage.end()) {
+        id_it->second.covered_ranges.Clear();
+      }
     }
   }
   // edites.clear();

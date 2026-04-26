@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 
 #include "rocksdb/rocksdb_namespace.h"
 
@@ -94,6 +95,26 @@ YLT_REFL(PartitionStats, growth_rate, flush_count, file_count, point_entries,
          total_entries, point_deletions, range_deletions, raw_key_size,
          raw_value_size, data_size);
 
+// A set of non-overlapping half-open user-key intervals [start, end).
+// nullopt in start represents -INF; nullopt in end represents +INF.
+// Intervals are maintained sorted and merged (no overlaps or adjacent segments).
+struct KeyIntervalSet {
+  using Bound = std::optional<std::string>;
+  std::vector<std::pair<Bound, Bound>> intervals;
+
+  // Add interval [add_start, add_end) and merge any overlapping/adjacent ones.
+  void Add(const Bound& add_start, const Bound& add_end);
+
+  // Returns true if the union of all intervals covers [left, right) entirely.
+  bool CoversAll(const Bound& left, const Bound& right) const;
+
+  bool Empty() const { return intervals.empty(); }
+  void Clear() { intervals.clear(); }
+
+  std::string DebugString() const;
+};
+YLT_REFL(KeyIntervalSet, intervals);
+
 // [-INF, k1), [k1, k2), ..., [kn, +INF)
 // 只存boundaries会使得分区信息不好处理;
 struct PartitionInfo {
@@ -102,17 +123,22 @@ struct PartitionInfo {
   std::optional<std::string> left_bound;
   // right_bound is derived dynamically from the next left boundary.
   std::optional<std::string> right_bound;
+  // Accumulated range-tombstone coverage within this partition.
+  // Persisted in Manifest. Reset after a RangeDelete compaction.
+  KeyIntervalSet covered_ranges;
 
   std::string DebugString() const {
     std::string out = "PartitionInfo{partition_id=";
     out.append(std::to_string(partition_id));
     out.append(", stats=" + stats.DebugString());
+    out.append(", covered_ranges=" + covered_ranges.DebugString());
     out.append("}");
     return out;
   }
 };
 
-YLT_REFL(PartitionInfo, stats, partition_id, left_bound, right_bound);
+YLT_REFL(PartitionInfo, stats, partition_id, left_bound, right_bound,
+         covered_ranges);
 
 class PartitionTableEdits;
 
@@ -123,7 +149,7 @@ class PartitionTable {
   friend class PartitionTableEdits;
   // RTTI仅在Debug下
   struct Plan {
-    enum class Type : uint8_t { kSplit, kMerge, kPartition };
+    enum class Type : uint8_t { kSplit, kMerge, kPartition, kRangeDelete };
     explicit Plan(Type type) : type(type) {}
     virtual ~Plan() = default;
     virtual std::unordered_set<PartitionID> GetBusyPartitions() const = 0;
@@ -171,6 +197,19 @@ class PartitionTable {
     }
     PartitionID left_pid;
     PartitionID right_pid;
+  };
+
+  // Compact all files in a partition to GC range-tombstone-covered keys.
+  struct RangeDeleteCompactionPlan : Plan {
+    RangeDeleteCompactionPlan() : Plan(Type::kRangeDelete) {}
+    ~RangeDeleteCompactionPlan() override = default;
+    std::unordered_set<PartitionID> GetBusyPartitions() const override {
+      return {pid};
+    }
+    std::string DebugString() const override {
+      return "RangeDeleteCompactionPlan{pid=" + std::to_string(pid) + "}";
+    }
+    PartitionID pid;
   };
   PartitionTable() = default;
   PartitionTable(uint32_t max_partitions, double split_grouth_threshold,
@@ -290,7 +329,12 @@ class PartitionTable {
   std::shared_ptr<Plan> GetCompactionPlan(
       const std::unordered_set<PartitionID>& excluded = {}) const {
     auto compaction_type = NeedCompaction(excluded);
-    if (compaction_type == CompactionType::kPartition) {
+    if (compaction_type == CompactionType::kRangeDelete) {
+      auto plan = GetRangeDeletePlan(excluded);
+      if (plan) {
+        return std::make_shared<RangeDeleteCompactionPlan>(*plan);
+      }
+    } else if (compaction_type == CompactionType::kPartition) {
       auto plan = GetPartitionCompactionPlan(excluded);
       if (plan) {
         return std::make_shared<PartitionCompactionPlan>(*plan);
@@ -309,6 +353,11 @@ class PartitionTable {
     return nullptr;
   }
 
+  // Returns the first partition whose accumulated covered_ranges spans the
+  // full partition key range. excluded partitions are skipped.
+  std::optional<RangeDeleteCompactionPlan> GetRangeDeletePlan(
+      const std::unordered_set<PartitionID>& excluded = {}) const;
+
   // 若存在 file_count >= file_num_compaction_trigger_ 的分区，
   // 则返回 file_count 最大的那个。excluded 中的分区会被跳过。
   std::optional<PartitionCompactionPlan> GetPartitionCompactionPlan(
@@ -324,14 +373,12 @@ class PartitionTable {
   std::optional<MergePlan> GetMergePlan(
       const std::unordered_set<PartitionID>& excluded = {}) const;
 
-  // NOTE: kPartition must have the highest numeric value so that
-  // ComputeCompactionScore() returns the largest score when intra-partition
-  // compaction is needed (higher score = higher priority).
   enum class CompactionType : uint8_t {
     kNone = 0,
     kMerge = 1,
     kSplit = 2,
-    kPartition = 3
+    kPartition = 3,
+    kRangeDelete = 4
   };
   // excluded: 正在 compaction 的分区 ID 集合，这些分区在本次选择中会被跳过。
   CompactionType NeedCompaction(
@@ -381,7 +428,14 @@ class PartitionTableEdits {
   using SplitPlan = PartitionTable::SplitPlan;
   using MergePlan = PartitionTable::MergePlan;
   struct Edit {
-    enum class Type : uint8_t { kSplit, kMerge, kPartitionUpdate, kInit };
+    enum class Type : uint8_t {
+      kSplit,
+      kMerge,
+      kPartitionUpdate,
+      kInit,
+      kCoverageUpdate,
+      kCoverageReset
+    };
     explicit Edit(Type type) : type(type) {}
     Type type;
   };
@@ -422,6 +476,36 @@ class PartitionTableEdits {
 
   void AddInitPartitionTable(std::shared_ptr<PartitionTable> new_pt) {
     edites_.push_back(std::make_shared<InitPartitionTable>(std::move(new_pt)));
+  }
+
+  struct PartitionCoverageUpdate : Edit {
+    PartitionID pid;
+    // Intervals [start, end) to accumulate into covered_ranges.
+    std::vector<std::pair<std::optional<std::string>, std::optional<std::string>>>
+        ranges;
+    PartitionCoverageUpdate(
+        PartitionID p,
+        std::vector<std::pair<std::optional<std::string>, std::optional<std::string>>>
+            r)
+        : Edit(Type::kCoverageUpdate), pid(p), ranges(std::move(r)) {}
+  };
+
+  struct PartitionCoverageReset : Edit {
+    PartitionID pid;
+    explicit PartitionCoverageReset(PartitionID p)
+        : Edit(Type::kCoverageReset), pid(p) {}
+  };
+
+  void AddPartitionCoverageUpdate(
+      PartitionID pid,
+      std::vector<std::pair<std::optional<std::string>, std::optional<std::string>>>
+          ranges) {
+    edites_.push_back(
+        std::make_shared<PartitionCoverageUpdate>(pid, std::move(ranges)));
+  }
+
+  void AddPartitionCoverageReset(PartitionID pid) {
+    edites_.push_back(std::make_shared<PartitionCoverageReset>(pid));
   }
 
   auto GetEdits() const { return edites_; }

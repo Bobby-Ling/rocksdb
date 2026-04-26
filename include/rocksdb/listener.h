@@ -134,6 +134,8 @@ enum class CompactionReason : int {
   kDeltaSplit,
   // [Delta] Intra-partition compaction (reduce sorted runs within a partition)
   kDeltaPartition,
+  // [Delta] Compact all files in a partition to GC range-tombstone-covered keys
+  kDeltaRangeDelete,
   // Manual compaction
   kManualCompaction,
   // DB::SuggestCompactRange() marked files for compaction

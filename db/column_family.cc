@@ -290,6 +290,9 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
     result.level0_slowdown_writes_trigger = std::numeric_limits<int>::max();
     result.level0_stop_writes_trigger = std::numeric_limits<int>::max();
     result.level0_file_num_compaction_trigger = result.compaction_options_delta.partition_file_num_compaction_trigger;
+
+    result.compaction_options_universal.max_merge_width = std::numeric_limits<uint32_t>::max();
+    result.compaction_options_universal.max_size_amplification_percent = 0;
   }
 
   if (result.max_bytes_for_level_multiplier <= 0) {

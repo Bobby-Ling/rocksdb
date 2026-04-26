@@ -1102,7 +1102,7 @@ Status FlushJob::WriteLevel0Table() {
               &part_table_properties, write_hint, full_history_ts_low,
               blob_callback_, &part_entries, &memtable_payload_bytes,
               &memtable_garbage_bytes, lb_ptr ? &lb_ikey : nullptr,
-              ub_ptr ? &ub_ikey : nullptr, &part_point_entries);
+              ub_ptr ? &ub_ikey : nullptr, &part_point_entries, pt_edits);
           assert(!s.ok() || part_io_s.ok());
           part_io_s.PermitUncheckedError();
 

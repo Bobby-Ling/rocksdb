@@ -81,6 +81,13 @@ Compaction* DeltaCompactionPicker::PickCompaction(
     partition_ids.insert(partition_plan->pid);
     target_partition_count = 1;
     reason = CompactionReason::kDeltaPartition;
+  } else if (plan->type == PartitionTable::Plan::Type::kRangeDelete) {
+    auto rd_plan =
+        std::static_pointer_cast<PartitionTable::RangeDeleteCompactionPlan>(
+            plan);
+    partition_ids.insert(rd_plan->pid);
+    target_partition_count = 1;
+    reason = CompactionReason::kDeltaRangeDelete;
   } else {
     assert(false);
     return nullptr;
@@ -93,8 +100,14 @@ Compaction* DeltaCompactionPicker::PickCompaction(
     return nullptr;
   }
 
+  // For RangeDelete compaction.
+  MutableCFOptions overrided_mutable_cf_options = mutable_cf_options;
+  if (reason == CompactionReason::kDeltaRangeDelete) {
+    overrided_mutable_cf_options.level0_file_num_compaction_trigger = 1;
+  }
+
   UniversalCompactionBuilder builder(
-      ioptions_, icmp(), cf_name, mutable_cf_options, mutable_db_options,
+      ioptions_, icmp(), cf_name, overrided_mutable_cf_options, mutable_db_options,
       std::move(vstorage_view), this, log_buffer);
 
   auto* c = builder.PickCompaction();

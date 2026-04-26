@@ -20,6 +20,7 @@
 #include "db/internal_stats.h"
 #include "db/merge_helper.h"
 #include "db/output_validator.h"
+#include "db/partition_table.h"
 #include "db/range_del_aggregator.h"
 #include "db/table_cache.h"
 #include "db/version_edit.h"
@@ -75,7 +76,8 @@ Status BuildTable(
     BlobFileCompletionCallback* blob_callback, uint64_t* num_input_entries,
     uint64_t* memtable_payload_bytes, uint64_t* memtable_garbage_bytes,
     const InternalKey* smallest, const InternalKey* largest,
-    uint64_t* num_point_input_entries) {
+    uint64_t* num_point_input_entries,
+    PartitionTableEdits* pt_edits) {
   assert((tboptions.column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          tboptions.column_family_name.empty());
@@ -259,6 +261,9 @@ Status BuildTable(
     }
 
     if (s.ok()) {
+      std::vector<std::pair<std::optional<std::string>,
+                            std::optional<std::string>>>
+          covered_ranges;
       auto range_del_it = range_del_agg->NewIterator();
       for (range_del_it->SeekToFirst(); range_del_it->Valid();
            range_del_it->Next()) {
@@ -268,6 +273,15 @@ Status BuildTable(
         meta->UpdateBoundariesForRange(kv.first, tombstone.SerializeEndKey(),
                                        tombstone.seq_,
                                        tboptions.internal_comparator);
+        if (pt_edits != nullptr) {
+          assert(meta->partition_id != kInvalidPartitionID);
+          covered_ranges.emplace_back(tombstone.start_key_.ToString(),
+                                      tombstone.end_key_.ToString());
+        }
+      }
+      if (pt_edits != nullptr && !covered_ranges.empty()) {
+        pt_edits->AddPartitionCoverageUpdate(meta->partition_id,
+                                             std::move(covered_ranges));
       }
     }
 
