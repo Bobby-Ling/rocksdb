@@ -19,15 +19,34 @@ echo using $DB_BENCH
 # =========================
 # Common config
 # =========================
-NUM=5000000
+NUM=50000000
 THREADS=8
-DURATION=120
+# DURATION=120
 KEY_SIZE=16
 VALUE_SIZE=100
 WRITE_BUFFER_SIZE=$((32 * 1024 * 1024))
 TARGET_FILE_SIZE=$((32 * 1024 * 1024))
 MAX_BYTES_FOR_LEVEL_BASE=$((128 * 1024 * 1024))
 MAX_BACKGROUND_JOBS=8
+
+# Hotspot curve (mixgraph)
+MIX_GET_RATIO=0.20
+MIX_PUT_RATIO=0.70
+MIX_SEEK_RATIO=0.10
+MIX_MAX_SCAN_LEN=64
+# MIX_ACCESSES=2500000
+
+# Prefix-range skew: f(x)=a*exp(b*x)+c*exp(d*x)
+KEYRANGE_NUM=12
+KEYRANGE_DIST_A=5.0
+KEYRANGE_DIST_B=-0.3
+KEYRANGE_DIST_C=-100
+KEYRANGE_DIST_D=-3.45
+
+# In-range key skew: f(x)=a*x^b
+KEY_DIST_A=1.0
+KEY_DIST_B=0
+# KEYRANGE_DIST_D=2
 
 # DeltaBench config
 DELTA_BENCH_ROWSET_NUM=4
@@ -72,17 +91,32 @@ common_flags=(
 )
 
 delta_flags=(
-  "--delta_max_partitions=8" # 8/2=4
+  "--delta_max_partitions=16"
   "--delta_partition_split_growth_threshold=1.5"
   "--delta_partition_merge_growth_threshold=0.5"
   "--delta_partition_target_file_size=$TARGET_FILE_SIZE"
-  "--delta_partition_file_num_compaction_trigger=4"
+  "--delta_partition_file_num_compaction_trigger=2"
 )
 
 delta_bench_flags=(
   "--delta_bench_rowset_num=$DELTA_BENCH_ROWSET_NUM"
   "--delta_bench_rowset_trigger_percent=$DELTA_BENCH_ROWSET_TRIGGER_PERCENT"
   "--delta_bench_delta_merge_count=$DELTA_BENCH_DELTA_MERGE_COUNT"
+)
+
+mixgraph_hotspot_flags=(
+  "--mix_get_ratio=$MIX_GET_RATIO"
+  "--mix_put_ratio=$MIX_PUT_RATIO"
+  "--mix_seek_ratio=$MIX_SEEK_RATIO"
+  # "--mix_max_scan_len=$MIX_MAX_SCAN_LEN"
+  # "--mix_accesses=$MIX_ACCESSES"
+  "--keyrange_num=$KEYRANGE_NUM"
+  "--keyrange_dist_a=$KEYRANGE_DIST_A"
+  "--keyrange_dist_b=$KEYRANGE_DIST_B"
+  "--keyrange_dist_c=$KEYRANGE_DIST_C"
+  "--keyrange_dist_d=$KEYRANGE_DIST_D"
+  "--key_dist_a=$KEY_DIST_A"
+  "--key_dist_b=$KEY_DIST_B"
 )
 
 run_delta_bench() {
@@ -94,6 +128,7 @@ run_delta_bench() {
     "${common_flags[@]}" \
     "${delta_flags[@]}" \
     "${delta_bench_flags[@]}" \
+    "${mixgraph_hotspot_flags[@]}" \
     --report_file="$DELTA_REPORT" \
     --db="$DB_DIR_DELTA" \
     2>&1 | tee "$DELTA_LOG"
@@ -108,6 +143,7 @@ run_delta_bench_leveled() {
     --compaction_style=0 \
     "${common_flags[@]}" \
     "${delta_bench_flags[@]}" \
+    "${mixgraph_hotspot_flags[@]}" \
     --report_file="$LEVELED_REPORT" \
     --db="$DB_DIR_LEVELED" \
     2>&1 | tee "$LEVELED_LOG"

@@ -2857,6 +2857,13 @@ class Benchmark {
       ErrorExit();
     }
 
+    if (FLAGS_key_dist_a == 0.0) {
+      // fprintf(stderr,
+      //         "deltabench requires --key_dist_a > 0 for key distribution\n");
+      // ErrorExit();
+      // random in mixgraph
+    }
+
     delta_bench_state_.reset(new DeltaBenchState());
     delta_bench_state_->rowset_num = FLAGS_delta_bench_rowset_num;
     delta_bench_state_->rowset_size =
@@ -6644,7 +6651,7 @@ class Benchmark {
           FLAGS_num, FLAGS_keyrange_dist_a, FLAGS_keyrange_dist_b,
           FLAGS_keyrange_dist_c, FLAGS_keyrange_dist_d);
     }
-    if (FLAGS_key_dist_a == 0 || FLAGS_key_dist_b == 0) {
+    if (FLAGS_key_dist_a == 0) {
       use_random_modeling = true;
     }
 
@@ -6729,8 +6736,12 @@ class Benchmark {
       } else if (query_type == 1) {
         // the Put query
         puts++;
-        int64_t val_size = ParetoCdfInversion(
-            u, FLAGS_value_theta, FLAGS_value_k, FLAGS_value_sigma);
+        int64_t val_size = ParetoCdfInversion(u, FLAGS_value_theta,
+                                              FLAGS_value_k, FLAGS_value_sigma);
+        if (delta_bench_state_ != nullptr) {
+          // in delta bench value size is fixed value.
+          val_size = FLAGS_value_size;
+        }
         if (val_size < 10) {
           val_size = 10;
         } else if (val_size > value_max) {
@@ -6749,6 +6760,13 @@ class Benchmark {
         if (thread->shared->write_rate_limiter && puts % 100 == 0) {
           thread->shared->write_rate_limiter->Request(100, Env::IO_HIGH,
                                                       nullptr /*stats*/);
+        }
+        if (delta_bench_state_ != nullptr) {
+          uint64_t rowset_id =
+              std::min<uint64_t>(key_rand / delta_bench_state_->rowset_size,
+                                 delta_bench_state_->rowset_num - 1);
+          delta_bench_state_->rowset_write_counts[rowset_id].fetch_add(
+              1, std::memory_order_relaxed);
         }
         thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kWrite);
       } else if (query_type == 2) {
@@ -7027,71 +7045,7 @@ class Benchmark {
 
   void DeltaBench(ThreadState* thread) {
     if (thread->tid > 0) {
-      ReadOptions options = read_options_;
-      RandomGenerator gen;
-      std::string value;
-      int64_t found = 0;
-      int64_t reads_done = 0;
-      int64_t writes_done = 0;
-
-      std::unique_ptr<const char[]> key_guard;
-      Slice key = AllocateKey(&key_guard);
-
-      std::unique_ptr<char[]> ts_guard;
-      if (user_timestamp_size_ > 0) {
-        ts_guard.reset(new char[user_timestamp_size_]);
-      }
-
-      while (!DeltaBenchFinished()) {
-        DB* db = SelectDB(thread);
-        uint64_t key_id = thread->rand.Next() % FLAGS_num;
-        GenerateKeyFromInt(key_id, FLAGS_num, &key);
-
-        // Randomly decide whether to do a read or write operation
-        // based on FLAGS_readwritepercent
-        if (thread->rand.Next() % 100 < static_cast<unsigned int>(FLAGS_readwritepercent)) {
-          Slice ts;
-          if (user_timestamp_size_ > 0) {
-            ts = mock_app_clock_->GetTimestampForRead(thread->rand,
-                                                      ts_guard.get());
-            options.timestamp = &ts;
-          }
-          Status s = db->Get(options, key, &value);
-          if (!s.ok() && !s.IsNotFound()) {
-            fprintf(stderr, "get error: %s\n", s.ToString().c_str());
-          } else if (!s.IsNotFound()) {
-            found++;
-          }
-          reads_done++;
-          thread->stats.FinishedOps(nullptr, db, 1, kRead);
-        } else {
-          Status s;
-          if (user_timestamp_size_ > 0) {
-            Slice ts = mock_app_clock_->Allocate(ts_guard.get());
-            s = db->Put(write_options_, key, ts, gen.Generate());
-          } else {
-            s = db->Put(write_options_, key, gen.Generate());
-          }
-          if (!s.ok()) {
-            fprintf(stderr, "put error: %s\n", s.ToString().c_str());
-            ErrorExit();
-          }
-          uint64_t rowset_id = std::min<uint64_t>(
-              static_cast<uint64_t>(key_id / delta_bench_state_->rowset_size),
-              static_cast<uint64_t>(delta_bench_state_->rowset_num - 1));
-          delta_bench_state_->rowset_write_counts[rowset_id].fetch_add(
-              1, std::memory_order_relaxed);
-          writes_done++;
-          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
-        }
-      }
-      char msg[128];
-      snprintf(msg, sizeof(msg),
-               "( reads:%" PRIu64 " writes:%" PRIu64 " found:%" PRIu64
-               " merges:%" PRIu64 " )",
-               reads_done, writes_done, found,
-               delta_bench_state_->merges_done.load(std::memory_order_relaxed));
-      thread->stats.AddMessage(msg);
+      MixGraph(thread);
     } else {
       BGDeltaBenchMerger(thread);
     }
