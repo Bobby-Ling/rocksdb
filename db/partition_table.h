@@ -21,8 +21,6 @@ using PartitionID = int64_t;
 static constexpr PartitionID kInvalidPartitionID = -1;
 
 struct PartitionStats {
-  int64_t growth_rate = 0;
-  uint64_t flush_count = 0;
   int64_t file_count = 0;
   uint64_t point_entries = 0;
   uint64_t total_entries = 0;
@@ -33,8 +31,6 @@ struct PartitionStats {
   uint64_t data_size = 0;
 
   PartitionStats& operator+=(const PartitionStats& other) {
-    growth_rate += other.growth_rate;
-    flush_count += other.flush_count;
     file_count += other.file_count;
     point_entries += other.point_entries;
     total_entries += other.total_entries;
@@ -47,8 +43,6 @@ struct PartitionStats {
   }
 
   PartitionStats& operator-=(const PartitionStats& other) {
-    growth_rate -= other.growth_rate;
-    flush_count -= other.flush_count;
     file_count -= other.file_count;
     point_entries -= other.point_entries;
     total_entries -= other.total_entries;
@@ -60,27 +54,10 @@ struct PartitionStats {
     return *this;
   }
 
-  PartitionStats operator*(double ratio) const {
-    PartitionStats scaled;
-    scaled.growth_rate = static_cast<int64_t>(growth_rate * ratio);
-    scaled.flush_count = static_cast<uint64_t>(flush_count * ratio);
-    scaled.file_count = static_cast<int64_t>(file_count * ratio);
-    scaled.point_entries = static_cast<uint64_t>(point_entries * ratio);
-    scaled.total_entries = static_cast<uint64_t>(total_entries * ratio);
-    scaled.point_deletions = static_cast<uint64_t>(point_deletions * ratio);
-    scaled.range_deletions = static_cast<uint64_t>(range_deletions * ratio);
-    scaled.raw_key_size = static_cast<uint64_t>(raw_key_size * ratio);
-    scaled.raw_value_size = static_cast<uint64_t>(raw_value_size * ratio);
-    scaled.data_size = static_cast<uint64_t>(data_size * ratio);
-    return scaled;
-  }
-
   uint64_t RawBytes() const { return raw_key_size + raw_value_size; }
 
   std::string DebugString() const {
-    return "PartitionStats{growth_rate=" + std::to_string(growth_rate) +
-           ", flush_count=" + std::to_string(flush_count) +
-           ", file_count=" + std::to_string(file_count) +  // int64_t
+    return "PartitionStats{file_count=" + std::to_string(file_count) +
            ", point_entries=" + std::to_string(point_entries) +
            ", total_entries=" + std::to_string(total_entries) +
            ", point_deletions=" + std::to_string(point_deletions) +
@@ -91,9 +68,9 @@ struct PartitionStats {
   }
 };
 
-YLT_REFL(PartitionStats, growth_rate, flush_count, file_count, point_entries,
-         total_entries, point_deletions, range_deletions, raw_key_size,
-         raw_value_size, data_size);
+YLT_REFL(PartitionStats, file_count, point_entries, total_entries,
+         point_deletions, range_deletions, raw_key_size, raw_value_size,
+         data_size);
 
 // A set of non-overlapping half-open user-key intervals [start, end).
 // nullopt in start represents -INF; nullopt in end represents +INF.
@@ -153,6 +130,7 @@ class PartitionTable {
     explicit Plan(Type type) : type(type) {}
     virtual ~Plan() = default;
     virtual std::unordered_set<PartitionID> GetBusyPartitions() const = 0;
+    virtual std::unordered_set<PartitionID> GetOutPartitions() const = 0;
     virtual std::string DebugString() const = 0;
     Type type;
   };
@@ -163,6 +141,9 @@ class PartitionTable {
     PartitionCompactionPlan() : Plan(Type::kPartition) {}
     ~PartitionCompactionPlan() override = default;
     std::unordered_set<PartitionID> GetBusyPartitions() const override {
+      return {pid};
+    }
+    std::unordered_set<PartitionID> GetOutPartitions() const override {
       return {pid};
     }
     std::string DebugString() const override {
@@ -176,6 +157,10 @@ class PartitionTable {
     ~SplitPlan() override = default;
     std::unordered_set<PartitionID> GetBusyPartitions() const override {
       return {pid};
+    }
+    std::unordered_set<PartitionID> GetOutPartitions() const override {
+      assert(new_pid != kInvalidPartitionID);
+      return {pid, new_pid};
     }
     std::string DebugString() const override {
       return "SplitPlan{pid=" + std::to_string(pid) + "}";
@@ -191,6 +176,9 @@ class PartitionTable {
     std::unordered_set<PartitionID> GetBusyPartitions() const override {
       return {left_pid, right_pid};
     }
+    std::unordered_set<PartitionID> GetOutPartitions() const override {
+      return {right_pid};
+    }
     std::string DebugString() const override {
       return "MergePlan{left_pid=" + std::to_string(left_pid) +
              ", right_pid=" + std::to_string(right_pid) + "}";
@@ -204,6 +192,9 @@ class PartitionTable {
     RangeDeleteCompactionPlan() : Plan(Type::kRangeDelete) {}
     ~RangeDeleteCompactionPlan() override = default;
     std::unordered_set<PartitionID> GetBusyPartitions() const override {
+      return {pid};
+    }
+    std::unordered_set<PartitionID> GetOutPartitions() const override {
       return {pid};
     }
     std::string DebugString() const override {
@@ -226,7 +217,7 @@ class PartitionTable {
                        other.file_num_compaction_trigger_) {
     next_partition_id_ = other.next_partition_id_;
     partition_storage = other.partition_storage;
-    // growth_rate_index = other.growth_rate_index;
+    // data_size_index = other.data_size_index;
     // pid_index = other.pid_index;
 
     RebuildIndex();
@@ -280,7 +271,7 @@ class PartitionTable {
   using PartitionTableStorage =
       std::map<std::optional<std::string>, PartitionInfo, Comparator>;
   PartitionTableStorage partition_storage;
-  std::multimap<int64_t, PartitionTableStorage::iterator> growth_rate_index;
+  std::multimap<uint64_t, PartitionTableStorage::iterator> data_size_index;
   std::map<PartitionID, PartitionTableStorage::iterator> pid_index;
 
   PartitionID next_partition_id_ = 0;
@@ -313,9 +304,9 @@ class PartitionTable {
   // 需要先调用 InitFirstPartition。
   PartitionID AddPartition(const std::string& left_bound);
 
-  PartitionInfo GetLowestGrowthPartition() const;
+  PartitionInfo GetLowestDataSizePartition() const;
 
-  PartitionInfo GetHighestGrowthPartition() const;
+  PartitionInfo GetHighestDataSizePartition() const;
 
   // Returns all partition IDs in order
   std::vector<PartitionID> GetPartitions() const;
@@ -395,10 +386,10 @@ class PartitionTable {
 
  private:
   void RebuildIndex() {
-    growth_rate_index.clear();
+    data_size_index.clear();
     pid_index.clear();
     for (auto it = partition_storage.begin(); it != partition_storage.end(); ++it) {
-      growth_rate_index.emplace(it->second.stats.growth_rate, it);
+      data_size_index.emplace(it->second.stats.data_size, it);
       pid_index.emplace(it->second.partition_id, it);
     }
   }
@@ -413,9 +404,9 @@ class PartitionTable {
   PartitionInfo BuildPartitionInfo(
       PartitionTableStorage::const_iterator it) const;
 
-  void EraseGrowthIndex(PartitionTableStorage::iterator pm_it);
+  void EraseDataSizeIndex(PartitionTableStorage::iterator pm_it);
 
-  // 执行拆分：在 new_boundary 处创建新分区，将 pid 的 stats 近似均分。
+  // 执行拆分：在 new_boundary 处创建新分区，stats 由 CompactionJob 回填。
   void Split(PartitionID pid, const std::string& new_boundary);
 
   // 执行合并：删除 left_pid，将其 stats 合并到 right_pid。
@@ -432,6 +423,7 @@ class PartitionTableEdits {
       kSplit,
       kMerge,
       kPartitionUpdate,
+      kPartitionSetStats,
       kInit,
       kCoverageUpdate,
       kCoverageReset
@@ -455,6 +447,12 @@ class PartitionTableEdits {
     PartitionUpdate(PartitionID pid, PartitionStats stats)
       : Edit(Type::kPartitionUpdate), pid(pid), stats(std::move(stats)) {}
   };
+  struct PartitionSetStats : Edit {
+    PartitionID pid;
+    PartitionStats stats;
+    PartitionSetStats(PartitionID pid, PartitionStats stats)
+        : Edit(Type::kPartitionSetStats), pid(pid), stats(std::move(stats)) {}
+  };
   struct InitPartitionTable : Edit {
     std::shared_ptr<PartitionTable> pt;
     InitPartitionTable(std::shared_ptr<PartitionTable> pt)
@@ -464,6 +462,10 @@ class PartitionTableEdits {
   // Flush时按分区收集统计信息，并在 edit_ 中记录分区表更新。
   void UpdatePartitionStats(PartitionID pid, const PartitionStats& stats) {
     edites_.push_back(std::make_shared<PartitionUpdate>(pid, stats));
+  }
+
+  void SetPartitionStats(PartitionID pid, const PartitionStats& stats) {
+    edites_.push_back(std::make_shared<PartitionSetStats>(pid, stats));
   }
 
   void AddSplit(const SplitPlan& plan, const std::string& new_boundary) {

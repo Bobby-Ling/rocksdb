@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -58,6 +59,26 @@
 #include "util/stop_watch.h"
 
 namespace ROCKSDB_NAMESPACE {
+
+namespace {
+PartitionStats BuildPartitionStatsFromTableProperties(
+    const TableProperties& table_properties) {
+  PartitionStats stats;
+  stats.file_count = 1;
+  stats.total_entries = table_properties.num_entries;
+  stats.point_deletions = table_properties.num_deletions;
+  stats.range_deletions = table_properties.num_range_deletions;
+  stats.raw_key_size = table_properties.raw_key_size;
+  stats.raw_value_size = table_properties.raw_value_size;
+  stats.data_size = table_properties.data_size;
+  stats.point_entries = table_properties.num_entries >=
+                                table_properties.num_deletions
+                            ? table_properties.num_entries -
+                                  table_properties.num_deletions
+                            : 0;
+  return stats;
+}
+}  // namespace
 
 const char* GetCompactionReasonString(CompactionReason compaction_reason) {
   switch (compaction_reason) {
@@ -1630,20 +1651,25 @@ Status CompactionJob::InstallCompactionResults(
   assert(edit);
 
   if (const auto& plan = compaction->GetCompactionPlan()) {
-    const auto* base_vstorage = compaction->input_version()->storage_info();
-    const auto& delta_opts =
-        compaction->mutable_cf_options()->compaction_options_delta;
     auto* pt_editor = edit->GetPartitionTableEdits();
     assert(pt_editor != nullptr);
 
+    // Rebuild affected partition stats from compaction outputs.
+    std::unordered_set<PartitionID> out_partitions = plan->GetOutPartitions();
     if (plan->type == PartitionTable::Plan::Type::kMerge) {
-      auto merge_plan = std::static_pointer_cast<PartitionTable::MergePlan>(plan);
+      auto merge_plan =
+          std::static_pointer_cast<PartitionTable::MergePlan>(plan);
       pt_editor->AddMerge(*merge_plan);
     } else if (plan->type == PartitionTable::Plan::Type::kSplit) {
-      auto split_plan = std::static_pointer_cast<PartitionTable::SplitPlan>(plan);
+      auto split_plan =
+          std::static_pointer_cast<PartitionTable::SplitPlan>(plan);
       if (!boundaries_.empty()) {
         pt_editor->AddSplit(*split_plan, boundaries_.front());
       }
+    } else if (plan->type == PartitionTable::Plan::Type::kPartition) {
+      auto partition_plan =
+          std::static_pointer_cast<PartitionTable::PartitionCompactionPlan>(
+              plan);
     } else if (plan->type == PartitionTable::Plan::Type::kRangeDelete) {
       // Reset the accumulated coverage so the partition doesn't re-trigger.
       auto rd_plan =
@@ -1651,31 +1677,21 @@ Status CompactionJob::InstallCompactionResults(
               plan);
       pt_editor->AddPartitionCoverageReset(rd_plan->pid);
     }
-    // Maintain file_count for all delta compaction plan;
-    {
-      std::unordered_map<PartitionID, int64_t> file_count_delta;
-      // Inputs are removed (negative contribution)
-      assert(compaction->num_input_levels() == 1);
-      for (const FileMetaData* f : *compaction->inputs(0)) {
-        if (f->partition_id != kInvalidPartitionID) {
-          file_count_delta[f->partition_id] -= 1;
-        }
+
+    std::unordered_map<PartitionID, PartitionStats> output_stats;
+    for (const auto& sub_compact : compact_->sub_compact_states) {
+      for (const auto& output : sub_compact.GetOutputs()) {
+        assert(output.meta.partition_id != kInvalidPartitionID);
+        // UpdateTableProperties must has been called
+        assert(output.table_properties != nullptr);
+        assert(out_partitions.count(output.meta.partition_id) > 0);
+        PartitionStats stats = BuildPartitionStatsFromTableProperties(
+            *output.table_properties);
+        output_stats[output.meta.partition_id] += stats;
       }
-      // Outputs are added (positive contribution)
-      for (const auto& sub_compact : compact_->sub_compact_states) {
-        for (const auto& output : sub_compact.GetOutputs()) {
-          if (output.meta.partition_id != kInvalidPartitionID) {
-            file_count_delta[output.meta.partition_id] += 1;
-          }
-        }
-      }
-      for (const auto& [pid, delta] : file_count_delta) {
-        if (delta != 0) {
-          PartitionStats stats;
-          stats.file_count = delta;
-          pt_editor->UpdatePartitionStats(pid, stats);
-        }
-      }
+    }
+    for (PartitionID pid : out_partitions) {
+      pt_editor->SetPartitionStats(pid, output_stats[pid]);
     }
   }
 

@@ -970,8 +970,6 @@ Status FlushJob::WriteLevel0Table() {
                                         uint64_t point_entries,
                                         bool has_output) {
           PartitionStats stats;
-          stats.growth_rate = static_cast<int64_t>(point_entries);
-          stats.flush_count = 1;
           stats.file_count = has_output ? 1 : 0;
           stats.point_entries = point_entries;
           stats.total_entries = tp.num_entries;

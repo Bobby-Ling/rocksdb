@@ -257,15 +257,15 @@ enum class PrepopulateBlobCache : uint8_t {
 // Options for kCompactionStyleDelta.
 struct CompactionOptionsDelta {
   // Maximum number of key-range partitions. Initial flush creates max_partitions/2
-  // partitions. Partitions split/merge based on growth_rate thresholds.
+  // partitions. Partitions split/merge based on data_size thresholds.
   // Default: 16
   uint32_t max_partitions = 16;
 
-  // Split a partition when its growth_rate exceeds average * this multiplier.
+  // Split a partition when its data_size exceeds average * this multiplier.
   // Default: 1.5
   double partition_split_growth_threshold = 1.5;
 
-  // Merge a partition when its growth_rate falls below average * this multiplier.
+  // Merge a partition when its data_size falls below average * this multiplier.
   // Default: 0.5
   double partition_merge_growth_threshold = 0.5;
 

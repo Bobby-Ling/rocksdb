@@ -566,11 +566,11 @@ DEFINE_uint32(delta_max_partitions, 16,
               "Delta compaction: Maximum number of key-range partitions.");
 
 DEFINE_double(delta_partition_split_growth_threshold, 1.5,
-              "Delta compaction: Split partition when growth_rate exceeds "
+              "Delta compaction: Split partition when data_size exceeds "
               "average * this multiplier.");
 
 DEFINE_double(delta_partition_merge_growth_threshold, 0.5,
-              "Delta compaction: Merge partition when growth_rate falls below "
+              "Delta compaction: Merge partition when data_size falls below "
               "average * this multiplier.");
 DEFINE_uint32(delta_partition_file_num_compaction_trigger, 4,
               "Delta compaction: Trigger compaction when a partition has at least "
