@@ -1,3 +1,6 @@
 [submodule "third-party/yalantinglibs"]
 	path = third-party/yalantinglibs
 	url = https://github.com/alibaba/yalantinglibs.git
+[submodule "third-party/nlohmann"]
+	path = third-party/nlohmann
+	url = https://github.com/nlohmann/json.git
