@@ -94,7 +94,6 @@ delta_flags=(
   "--delta_max_partitions=16"
   "--delta_partition_split_growth_threshold=1.5"
   "--delta_partition_merge_growth_threshold=0.5"
-  "--delta_partition_target_file_size=$TARGET_FILE_SIZE"
   "--delta_partition_file_num_compaction_trigger=2"
 )
 

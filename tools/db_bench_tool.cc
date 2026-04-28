@@ -572,11 +572,6 @@ DEFINE_double(delta_partition_split_growth_threshold, 1.5,
 DEFINE_double(delta_partition_merge_growth_threshold, 0.5,
               "Delta compaction: Merge partition when growth_rate falls below "
               "average * this multiplier.");
-
-DEFINE_uint64(delta_partition_target_file_size, 64 * 1048576,
-              "Delta compaction: Target bytes per SST file within a partition "
-              "(0 = no limit).");
-
 DEFINE_uint32(delta_partition_file_num_compaction_trigger, 4,
               "Delta compaction: Trigger compaction when a partition has at least "
               "this many files.");
@@ -4297,8 +4292,6 @@ class Benchmark {
           FLAGS_delta_partition_split_growth_threshold;
       options.compaction_options_delta.partition_merge_growth_threshold =
           FLAGS_delta_partition_merge_growth_threshold;
-      options.compaction_options_delta.partition_target_file_size =
-          FLAGS_delta_partition_target_file_size;
       options.compaction_options_delta.partition_file_num_compaction_trigger =
           FLAGS_delta_partition_file_num_compaction_trigger;
       options.compaction_options_delta.enable_read_optimization =

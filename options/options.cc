@@ -366,9 +366,6 @@ void ColumnFamilyOptions::Dump(Logger* log) const {
         log, "compaction_options_delta.partition_merge_growth_threshold: %f",
         compaction_options_delta.partition_merge_growth_threshold);
     ROCKS_LOG_HEADER(
-        log, "compaction_options_delta.partition_target_file_size: %" PRIu64,
-        compaction_options_delta.partition_target_file_size);
-    ROCKS_LOG_HEADER(
         log, "compaction_options_delta.partition_file_num_compaction_trigger: %d",
         compaction_options_delta.partition_file_num_compaction_trigger);
 
