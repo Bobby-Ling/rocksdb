@@ -359,6 +359,8 @@ class PartitionTable {
   // 一定存在
   PartitionInfo FindPartition(const std::string& user_key) const;
 
+  PartitionID FindPartitionID(const std::string& user_key) const;
+
   std::vector<PartitionID> FindPartitionInRange(const std::optional<std::string>& left, const std::optional<std::string>& right) const;
 
   std::optional<PartitionInfo> GetPartition(PartitionID pid) const {

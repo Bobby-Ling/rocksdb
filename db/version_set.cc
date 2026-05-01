@@ -2129,25 +2129,48 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
     pinned_iters_mgr->StartPinning();
   }
 
-  // Delta mode: use VersionStorageInfoViewDelta to confine the search to files
-  // in the target partition, avoiding full L0 scan.
-  // The view is kept alive here so its mutable brief storage outlives FilePicker.
-  std::unique_ptr<VersionStorageInfoViewDelta> partition_view;
+  std::array<FdWithKeyRange, 16> partition_l0_stack;
+  std::vector<FdWithKeyRange> partition_l0_heap;
+  LevelFilesBrief partition_l0_brief;
   autovector<LevelFilesBrief> partition_brief_holder;
   autovector<LevelFilesBrief>* briefs = &storage_info_.level_files_brief_;
   int num_levels_for_fp = storage_info_.num_non_empty_levels_;
-  if (storage_info_.compaction_style_ ==
-      CompactionStyle::kCompactionStyleDelta && mutable_cf_options_.compaction_options_delta.enable_read_optimization) {
+    if (storage_info_.compaction_style_ ==
+      CompactionStyle::kCompactionStyleDelta &&
+      mutable_cf_options_.compaction_options_delta.enable_read_optimization) {
     const auto* pt = storage_info_.GetPartitionTable().get();
     if (pt && pt->IsInitialized()) {
-      const PartitionInfo pi = pt->FindPartition(user_key.ToString());
-      partition_view = std::make_unique<VersionStorageInfoViewDelta>(
-          &storage_info_,
-          std::unordered_set<PartitionID>{pi.partition_id});
-      // LevelFilesBrief(0) filters by partition_id; result points into
-      // partition_view's mutable storage which stays alive until end of scope.
-      const LevelFilesBrief& pb = partition_view->LevelFilesBrief(0);
-      partition_brief_holder.push_back(pb);
+      const PartitionID partition_id = pt->FindPartitionID(user_key.ToString());
+      const LevelFilesBrief& full_l0 = storage_info_.LevelFilesBrief(0);
+      size_t partition_file_count = 0;
+      // Most partitions have few active L0 files; keep that common case on
+      // the stack and only spill to heap for unusually large partitions.
+      for (size_t i = 0; i < full_l0.num_files; i++) {
+        if (full_l0.files[i].file_metadata->partition_id != partition_id) {
+          continue;
+        }
+        if (partition_file_count < partition_l0_stack.size()) {
+          partition_l0_stack[partition_file_count] = full_l0.files[i];
+        } else {
+          if (partition_l0_heap.empty()) {
+            partition_l0_heap.reserve(full_l0.num_files);
+            partition_l0_heap.insert(partition_l0_heap.end(),
+                                     partition_l0_stack.begin(),
+                                     partition_l0_stack.end());
+          }
+          partition_l0_heap.push_back(full_l0.files[i]);
+        }
+        partition_file_count++;
+      }
+      partition_l0_brief.num_files = partition_file_count;
+      if (partition_file_count == 0) {
+        partition_l0_brief.files = nullptr;
+      } else if (partition_l0_heap.empty()) {
+        partition_l0_brief.files = partition_l0_stack.data();
+      } else {
+        partition_l0_brief.files = partition_l0_heap.data();
+      }
+      partition_brief_holder.push_back(partition_l0_brief);
       briefs = &partition_brief_holder;
       num_levels_for_fp = 1;
     }

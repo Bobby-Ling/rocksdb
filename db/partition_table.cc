@@ -129,6 +129,18 @@ PartitionInfo PartitionTable::FindPartition(const std::string& user_key) const {
   return BuildPartitionInfo(it);
 }
 
+PartitionID PartitionTable::FindPartitionID(const std::string& user_key) const {
+  assert(!partition_storage.empty());
+
+  std::optional<std::string> key = user_key;
+  auto it = partition_storage.upper_bound(key);
+  if (it == partition_storage.begin()) {
+    return it->second.partition_id;
+  }
+  --it;
+  return it->second.partition_id;
+}
+
 std::vector<PartitionID> PartitionTable::FindPartitionInRange(
     const std::optional<std::string>& left,
     const std::optional<std::string>& right) const {
