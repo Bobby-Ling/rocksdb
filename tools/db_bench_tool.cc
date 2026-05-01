@@ -4310,14 +4310,14 @@ class Benchmark {
           FLAGS_delta_partition_split_cooldown;
       options.compaction_options_delta.partition_merge_cooldown =
           FLAGS_delta_partition_merge_cooldown;
-      options.compaction_options_delta.enable_partition_split =
-        FLAGS_delta_enable_partition_split;
-      options.compaction_options_delta.enable_partition_merge =
-        FLAGS_delta_enable_partition_merge;
-      options.compaction_options_delta.enable_partition_compaction =
-        FLAGS_delta_enable_partition_compaction;
-      options.compaction_options_delta.enable_range_delete_compaction =
-        FLAGS_delta_enable_range_delete_compaction;
+        options.compaction_options_delta.enable_partition_split =
+          FLAGS_delta_enable_partition_split;
+        options.compaction_options_delta.enable_partition_merge =
+          FLAGS_delta_enable_partition_merge;
+        options.compaction_options_delta.enable_partition_compaction =
+          FLAGS_delta_enable_partition_compaction;
+        options.compaction_options_delta.enable_range_delete_compaction =
+          FLAGS_delta_enable_range_delete_compaction;
       options.compaction_options_delta.enable_read_optimization =
           FLAGS_delta_enable_read_optimization;
       // Delta style requires num_levels=1 (L0 only)
@@ -6649,6 +6649,10 @@ class Benchmark {
 
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
+    std::unique_ptr<const char[]> lower_bound_key_guard;
+    Slice lower_bound_key = AllocateKey(&lower_bound_key_guard);
+    std::unique_ptr<const char[]> upper_bound_key_guard;
+    Slice upper_bound_key = AllocateKey(&upper_bound_key_guard);
     PinnableSlice pinnable_val;
     query.Initiate(ratio);
 
@@ -6789,8 +6793,25 @@ class Benchmark {
       } else if (query_type == 2) {
         // Seek query
         if (db_with_cfh->db != nullptr) {
+          ReadOptions seek_read_options = read_options_;
+          if (delta_bench_state_ != nullptr) {
+            int64_t rowset_id = std::min<int64_t>(
+                key_rand / delta_bench_state_->rowset_size,
+                delta_bench_state_->rowset_num - 1);
+            int64_t begin_num =
+                rowset_id * delta_bench_state_->rowset_size;
+            int64_t end_num = std::min<int64_t>(
+                FLAGS_num,
+                (rowset_id + 1) * delta_bench_state_->rowset_size);
+            GenerateKeyFromInt(static_cast<uint64_t>(begin_num), FLAGS_num,
+                               &lower_bound_key);
+            GenerateKeyFromInt(static_cast<uint64_t>(end_num), FLAGS_num,
+                               &upper_bound_key);
+            seek_read_options.iterate_lower_bound = &lower_bound_key;
+            seek_read_options.iterate_upper_bound = &upper_bound_key;
+          }
           Iterator* single_iter = nullptr;
-          single_iter = db_with_cfh->db->NewIterator(read_options_);
+          single_iter = db_with_cfh->db->NewIterator(seek_read_options);
           if (single_iter != nullptr) {
             single_iter->Seek(key);
             seek++;
