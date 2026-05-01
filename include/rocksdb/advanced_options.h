@@ -273,6 +273,29 @@ struct CompactionOptionsDelta {
   // Default: 4
   uint32_t partition_file_num_compaction_trigger = 4;
 
+  // Window size for per-partition flush data-size history. Used to smooth
+  // RangeDelete-induced size oscillations when picking split / merge.
+  // Split candidacy uses max(history); merge candidacy uses min(history).
+  // TODO
+  // Default: 4
+  uint32_t partition_stats_window = 4;
+
+  // After a partition has been picked for split, suppress further split
+  // attempts on the involved partitions for this many PartitionTable apply
+  // events (i.e. flush / compaction edits). Counter-based so it is
+  // reproducible across runs (TTL).
+  // Default: 4
+  uint32_t partition_split_cooldown = 4;
+
+  // Same as above, for merge.
+  // Default: 4
+  uint32_t partition_merge_cooldown = 4;
+
+  bool enable_partition_split = true;
+  bool enable_partition_merge = true;
+  bool enable_partition_compaction = true;
+  bool enable_range_delete_compaction = true;
+
   // filter files by partition in L0 by lookup key
   // Defualt: true
   bool enable_read_optimization = true;

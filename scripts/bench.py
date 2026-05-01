@@ -76,6 +76,14 @@ class DeltaConfig:
             f"pt{self.delta_max_partitions}",
             f"trig{self.delta_partition_file_num_compaction_trigger}",
         ]
+        if not self.delta_enable_partition_split:
+            parts.append("nosplit")
+        if not self.delta_enable_partition_merge:
+            parts.append("nomerge")
+        if not self.delta_enable_partition_compaction:
+            parts.append("nopart")
+        if not self.delta_enable_range_delete_compaction:
+            parts.append("norangegc")
         return "_".join(parts)
 
 class COMPACTION_STYLES(Enum):

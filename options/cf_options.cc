@@ -1101,6 +1101,25 @@ void MutableCFOptions::Dump(Logger* log) const {
   ROCKS_LOG_INFO(
       log, "compaction_options_delta.partition_file_num_compaction_trigger: %d",
       compaction_options_delta.partition_file_num_compaction_trigger);
+  ROCKS_LOG_INFO(log,
+                 "compaction_options_delta.partition_stats_window: %u",
+                 compaction_options_delta.partition_stats_window);
+  ROCKS_LOG_INFO(log,
+                 "compaction_options_delta.partition_split_cooldown: %u",
+                 compaction_options_delta.partition_split_cooldown);
+  ROCKS_LOG_INFO(log,
+                 "compaction_options_delta.partition_merge_cooldown: %u",
+                 compaction_options_delta.partition_merge_cooldown);
+  ROCKS_LOG_INFO(log, "compaction_options_delta.enable_partition_split: %d",
+                 compaction_options_delta.enable_partition_split);
+  ROCKS_LOG_INFO(log, "compaction_options_delta.enable_partition_merge: %d",
+                 compaction_options_delta.enable_partition_merge);
+  ROCKS_LOG_INFO(log,
+                 "compaction_options_delta.enable_partition_compaction: %d",
+                 compaction_options_delta.enable_partition_compaction);
+  ROCKS_LOG_INFO(log,
+                 "compaction_options_delta.enable_range_delete_compaction: %d",
+                 compaction_options_delta.enable_range_delete_compaction);
 
   // Blob file related options
   ROCKS_LOG_INFO(log, "                        enable_blob_files: %s",

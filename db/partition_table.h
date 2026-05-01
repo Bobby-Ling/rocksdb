@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <limits>
 #include <map>
@@ -103,19 +105,42 @@ struct PartitionInfo {
   // Accumulated range-tombstone coverage within this partition.
   // Persisted in Manifest. Reset after a RangeDelete compaction.
   KeyIntervalSet covered_ranges;
+  // Recent per-flush data_size deltas applied to this partition.
+  // Used to smooth RangeDelete-induced fluctuations in split / merge
+  // selection. Capped at PartitionTable::stats_window_.
+  std::deque<uint64_t> history_data_size;
+  // Remaining apply-events before this partition is eligible for split /
+  // merge again. Decremented once per PartitionTable::ApplyToNewTable call.
+  uint32_t split_cooldown = 0;
+  uint32_t merge_cooldown = 0;
+
+  uint64_t MaxHistoryDataSize() const {
+    if (history_data_size.empty()) return 0;
+    uint64_t v = 0;
+    for (auto x : history_data_size) v = std::max(v, x);
+    return v;
+  }
+  uint64_t MinHistoryDataSize() const {
+    if (history_data_size.empty()) return 0;
+    uint64_t v = std::numeric_limits<uint64_t>::max();
+    for (auto x : history_data_size) v = std::min(v, x);
+    return v;
+  }
 
   std::string DebugString() const {
     std::string out = "PartitionInfo{partition_id=";
     out.append(std::to_string(partition_id));
     out.append(", stats=" + stats.DebugString());
     out.append(", covered_ranges=" + covered_ranges.DebugString());
+    out.append(", split_cooldown=" + std::to_string(split_cooldown));
+    out.append(", merge_cooldown=" + std::to_string(merge_cooldown));
     out.append("}");
     return out;
   }
 };
 
 YLT_REFL(PartitionInfo, stats, partition_id, left_bound, right_bound,
-         covered_ranges);
+         covered_ranges, history_data_size, split_cooldown, merge_cooldown);
 
 class PartitionTableEdits;
 
@@ -156,14 +181,19 @@ class PartitionTable {
     SplitPlan() : Plan(Type::kSplit) {}
     ~SplitPlan() override = default;
     std::unordered_set<PartitionID> GetBusyPartitions() const override {
-      return {pid};
+      std::unordered_set<PartitionID> busy{pid};
+      if (new_pid != kInvalidPartitionID) {
+        busy.insert(new_pid);
+      }
+      return busy;
     }
     std::unordered_set<PartitionID> GetOutPartitions() const override {
       assert(new_pid != kInvalidPartitionID);
       return {pid, new_pid};
     }
     std::string DebugString() const override {
-      return "SplitPlan{pid=" + std::to_string(pid) + "}";
+      return "SplitPlan{pid=" + std::to_string(pid) +
+             ", new_pid=" + std::to_string(new_pid) + "}";
     }
     PartitionID pid;
     // TODO(lcr) new_pid1 new_pid2
@@ -205,16 +235,35 @@ class PartitionTable {
   PartitionTable() = default;
   PartitionTable(uint32_t max_partitions, double split_grouth_threshold,
                  double merge_growth_threshold,
-                 uint32_t file_num_compaction_trigger)
+                 uint32_t file_num_compaction_trigger,
+                 uint32_t stats_window = 4,
+                 uint32_t split_cooldown = 4,
+                 uint32_t merge_cooldown = 4,
+                 bool enable_partition_split = true,
+                 bool enable_partition_merge = true,
+                 bool enable_partition_compaction = true,
+                 bool enable_range_delete_compaction = true)
       : max_partitions_(max_partitions),
         split_growth_threshold_(split_grouth_threshold),
         merge_growth_threshold_(merge_growth_threshold),
         file_num_compaction_trigger_(
-            file_num_compaction_trigger) {}
+            file_num_compaction_trigger),
+        stats_window_(stats_window),
+        split_cooldown_(split_cooldown),
+        merge_cooldown_(merge_cooldown),
+        enable_partition_split_(enable_partition_split),
+        enable_partition_merge_(enable_partition_merge),
+        enable_partition_compaction_(enable_partition_compaction),
+        enable_range_delete_compaction_(enable_range_delete_compaction) {}
   PartitionTable(const PartitionTable& other)
       : PartitionTable(other.max_partitions_, other.split_growth_threshold_,
                        other.merge_growth_threshold_,
-                       other.file_num_compaction_trigger_) {
+                       other.file_num_compaction_trigger_,
+                       other.stats_window_, other.split_cooldown_,
+                       other.merge_cooldown_, other.enable_partition_split_,
+                       other.enable_partition_merge_,
+                       other.enable_partition_compaction_,
+                       other.enable_range_delete_compaction_) {
     next_partition_id_ = other.next_partition_id_;
     partition_storage = other.partition_storage;
     // data_size_index = other.data_size_index;
@@ -239,12 +288,26 @@ class PartitionTable {
 
   void SetOptions(uint32_t max_partitions, double split_grouth_threshold,
                   double merge_growth_threshold,
-                  uint32_t file_num_compaction_trigger) {
+                  uint32_t file_num_compaction_trigger,
+                  uint32_t stats_window = 4,
+                  uint32_t split_cooldown = 4,
+                  uint32_t merge_cooldown = 4,
+                  bool enable_partition_split = true,
+                  bool enable_partition_merge = true,
+                  bool enable_partition_compaction = true,
+                  bool enable_range_delete_compaction = true) {
     this->max_partitions_ = max_partitions;
     this->split_growth_threshold_ = split_grouth_threshold;
     this->merge_growth_threshold_ = merge_growth_threshold;
     this->file_num_compaction_trigger_ =
         file_num_compaction_trigger;
+    this->stats_window_ = stats_window;
+    this->split_cooldown_ = split_cooldown;
+    this->merge_cooldown_ = merge_cooldown;
+    this->enable_partition_split_ = enable_partition_split;
+    this->enable_partition_merge_ = enable_partition_merge;
+    this->enable_partition_compaction_ = enable_partition_compaction;
+    this->enable_range_delete_compaction_ = enable_range_delete_compaction;
   };
 
  private:
@@ -267,6 +330,15 @@ class PartitionTable {
   // runtime from level0_file_num_compaction_trigger or dedicated option.
   uint32_t file_num_compaction_trigger_ =
       std::numeric_limits<uint32_t>::max();
+  // Per-partition flush data_size history window size.
+  uint32_t stats_window_ = 4;
+  // Cooldown counts (in apply events) after split / merge.
+  uint32_t split_cooldown_ = 4;
+  uint32_t merge_cooldown_ = 4;
+  bool enable_partition_split_ = true;
+  bool enable_partition_merge_ = true;
+  bool enable_partition_compaction_ = true;
+  bool enable_range_delete_compaction_ = true;
 
   using PartitionTableStorage =
       std::map<std::optional<std::string>, PartitionInfo, Comparator>;
@@ -303,6 +375,12 @@ class PartitionTable {
   // 插入一个分区边界, 如果重复返回kInvalidPartitionID, 否则返回新分区ID
   // 需要先调用 InitFirstPartition。
   PartitionID AddPartition(const std::string& left_bound);
+
+  // Returns the first partition id that is not currently used and is not in
+  // excluded. Used by split picker to reserve an output pid that does not
+  // collide with in-flight split plans from the same base version.
+  PartitionID RequestNextPartitionID(
+      const std::unordered_set<PartitionID>& excluded = {}) const;
 
   PartitionInfo GetLowestDataSizePartition() const;
 
@@ -407,7 +485,11 @@ class PartitionTable {
   void EraseDataSizeIndex(PartitionTableStorage::iterator pm_it);
 
   // 执行拆分：在 new_boundary 处创建新分区，stats 由 CompactionJob 回填。
-  void Split(PartitionID pid, const std::string& new_boundary);
+  PartitionID AddPartitionWithID(const std::string& left_bound,
+                                 PartitionID partition_id);
+
+  void Split(PartitionID pid, PartitionID new_pid,
+             const std::string& new_boundary);
 
   // 执行合并：删除 left_pid，将其 stats 合并到 right_pid。
   void Merge(PartitionID left_pid, PartitionID right_pid);

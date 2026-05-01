@@ -692,6 +692,11 @@ bool Compaction::ShouldFormSubcompactions() const {
     return (start_level_ == 0 || is_manual_compaction_) && output_level_ > 0;
   } else if (cfd_->ioptions()->compaction_style == kCompactionStyleUniversal) {
     return number_levels_ > 1 && output_level_ > 0;
+  } else if (cfd_->ioptions()->compaction_style == kCompactionStyleDelta) {
+    // Only the Split plan benefits from subcompactions: it must produce two
+    // disjoint output partitions and therefore needs a boundary key.
+    return compaction_plan_ != nullptr &&
+           compaction_plan_->type == PartitionTable::Plan::Type::kSplit;
   } else {
     return false;
   }

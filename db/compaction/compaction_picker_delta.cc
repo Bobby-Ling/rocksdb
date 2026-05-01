@@ -26,6 +26,8 @@ std::unordered_set<PartitionID> DeltaCompactionPicker::CollectBusyPartitions()
     if (!plan) continue;
     auto plan_busy = plan->GetBusyPartitions();
     busy.insert(plan_busy.begin(), plan_busy.end());
+    auto plan_out = plan->GetOutPartitions();
+    busy.insert(plan_out.begin(), plan_out.end());
   }
   return busy;
 }
@@ -98,6 +100,38 @@ Compaction* DeltaCompactionPicker::PickCompaction(
   const auto& files = vstorage_view->LevelFiles(0);
   if (files.empty() || AreFilesInCompaction(files)) {
     return nullptr;
+  }
+
+  if (reason == CompactionReason::kDeltaSplit ||
+      reason == CompactionReason::kDeltaMerge) {
+    std::vector<CompactionInputFiles> comp_inputs(1);
+    comp_inputs[0].level = 0;
+    comp_inputs[0].files = files;
+
+    const int output_level = 0;
+    const uint64_t target_file_size = mutable_cf_options.target_file_size_base;
+    const uint64_t max_compaction_bytes =
+        mutable_cf_options.max_compaction_bytes;
+    const uint32_t output_path_id = 0;
+    const CompressionType compression = GetCompressionType(
+        vstorage, mutable_cf_options, output_level, vstorage->base_level());
+    const CompressionOptions compression_opts =
+        GetCompressionOptions(mutable_cf_options, vstorage, output_level);
+
+    auto* c = new Compaction(
+        vstorage_view, ioptions_, mutable_cf_options, mutable_db_options,
+        std::move(comp_inputs), output_level, target_file_size,
+        max_compaction_bytes, output_path_id, compression, compression_opts,
+        Temperature::kUnknown, target_partition_count,
+        {}, false /* manual_compaction */, "",
+        vstorage_view->CompactionScore(0), false /* deletion_compaction */, true,
+        reason, BlobGarbageCollectionPolicy::kUseDefault, -1, plan);
+
+    RegisterCompaction(c);
+    ROCKS_LOG_INFO(ioptions_.info_log,
+                   "Picked Delta Compaction for partition plan: %s",
+                   plan->DebugString().c_str());
+    return c;
   }
 
   // For RangeDelete compaction.

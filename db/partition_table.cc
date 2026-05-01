@@ -1,5 +1,6 @@
 #include "db/partition_table.h"
 
+#include <algorithm>
 #include <cassert>
 #include <sstream>
 
@@ -185,20 +186,41 @@ PartitionID PartitionTable::InitFirstPartition() {
 }
 
 PartitionID PartitionTable::AddPartition(const std::string& left_bound) {
+  return AddPartitionWithID(left_bound, RequestNextPartitionID());
+}
+
+PartitionID PartitionTable::RequestNextPartitionID(
+    const std::unordered_set<PartitionID>& excluded) const {
+  for (PartitionID candidate = next_partition_id_;
+       candidate != std::numeric_limits<PartitionID>::max(); ++candidate) {
+    if (excluded.count(candidate) == 0 && pid_index.count(candidate) == 0) {
+      return candidate;
+    }
+  }
+  return kInvalidPartitionID;
+}
+
+PartitionID PartitionTable::AddPartitionWithID(const std::string& left_bound,
+                                               PartitionID partition_id) {
   if (left_bound.empty() || partition_storage.empty() ||
-      partition_storage.find(left_bound) != partition_storage.end()) {
+      partition_storage.find(left_bound) != partition_storage.end() ||
+      partition_id == kInvalidPartitionID ||
+      pid_index.count(partition_id) != 0) {
     return kInvalidPartitionID;
   }
 
-  PartitionID pid = next_partition_id_++;
   PartitionInfo info;
-  info.partition_id = pid;
+  info.partition_id = partition_id;
   info.left_bound = left_bound;
   auto [it, inserted] = partition_storage.emplace(left_bound, std::move(info));
   assert(inserted);
-  pid_index.emplace(pid, it);
+  pid_index.emplace(partition_id, it);
   data_size_index.emplace(0, it);
-  return pid;
+  if (partition_id >= next_partition_id_ &&
+      partition_id != std::numeric_limits<PartitionID>::max()) {
+    next_partition_id_ = partition_id + 1;
+  }
+  return partition_id;
 }
 
 void PartitionTable::RemovePartition(PartitionID pid) {
@@ -301,37 +323,59 @@ bool PartitionTable::DecodeFrom(const std::string_view& src,
 
 std::optional<PartitionTable::SplitPlan> PartitionTable::GetSplitPlan(
     const std::unordered_set<PartitionID>& excluded) const {
-  if (partition_storage.size() >= max_partitions_ || data_size_index.empty()) {
+  if (partition_storage.size() >= max_partitions_ || partition_storage.empty()) {
     return std::nullopt;
   }
   uint64_t total = 0;
-  for (const auto& kv : partition_storage) total += kv.second.stats.data_size;
-  uint64_t avg = total / static_cast<uint64_t>(partition_storage.size());
-  if (avg <= 0) return std::nullopt;
-
-  // Scan from largest data size downward; skip partitions in excluded.
-  for (auto it = data_size_index.rbegin(); it != data_size_index.rend(); ++it) {
-    auto pm_it = it->second;
-    PartitionID pid = pm_it->second.partition_id;
-    if (excluded.count(pid) != 0) continue;
-    if (static_cast<double>(it->first) <= avg * split_growth_threshold_) {
-      // Remaining entries all below threshold.
-      break;
-    }
-    SplitPlan plan;
-    plan.pid = pid;
-    plan.new_pid = next_partition_id_;
-    return plan;
+  uint64_t total_growth = 0;
+  for (const auto& kv : partition_storage) {
+    total += kv.second.stats.data_size;
+    total_growth += kv.second.MaxHistoryDataSize();
   }
-  return std::nullopt;
+  uint64_t avg_size = total / static_cast<uint64_t>(partition_storage.size());
+  uint64_t avg_growth =
+      total_growth / static_cast<uint64_t>(partition_storage.size());
+  if (avg_size == 0 || avg_growth == 0) return std::nullopt;
+
+  // Sort candidates by max(history) descending; pick first eligible.
+  // Eligibility: current size is large and recent growth is also large.
+  PartitionID best_pid = kInvalidPartitionID;
+  uint64_t best_growth = 0;
+  for (const auto& kv : partition_storage) {
+    const auto& info = kv.second;
+    PartitionID pid = info.partition_id;
+    if (excluded.count(pid) != 0) continue;
+    if (info.split_cooldown != 0) continue;
+    if (static_cast<double>(info.stats.data_size) <=
+        avg_size * split_growth_threshold_) {
+      continue;
+    }
+    uint64_t growth = info.MaxHistoryDataSize();
+    if (static_cast<double>(growth) <= avg_growth * split_growth_threshold_) {
+      continue;
+    }
+    if (growth > best_growth) {
+      best_growth = growth;
+      best_pid = pid;
+    }
+  }
+  if (best_pid == kInvalidPartitionID) return std::nullopt;
+  PartitionID new_pid = RequestNextPartitionID(excluded);
+  if (new_pid == kInvalidPartitionID) return std::nullopt;
+  SplitPlan plan;
+  plan.pid = best_pid;
+  plan.new_pid = new_pid;
+  return plan;
 }
 
-void PartitionTable::Split(PartitionID pid, const std::string& new_boundary) {
+void PartitionTable::Split(PartitionID pid, PartitionID new_pid,
+                           const std::string& new_boundary) {
   auto id_it = FindByPid(pid);
   assert(id_it != partition_storage.end());
 
-  if (new_boundary.empty() ||
-      partition_storage.find(new_boundary) != partition_storage.end()) {
+  if (new_boundary.empty() || new_pid == kInvalidPartitionID ||
+      partition_storage.find(new_boundary) != partition_storage.end() ||
+      pid_index.count(new_pid) != 0) {
     return;
   }
 
@@ -347,36 +391,61 @@ void PartitionTable::Split(PartitionID pid, const std::string& new_boundary) {
     return;
   }
 
-  PartitionID new_pid = AddPartition(new_boundary);
-  (void)new_pid;
+  AddPartitionWithID(new_boundary, new_pid);
 }
 
 std::optional<PartitionTable::MergePlan> PartitionTable::GetMergePlan(
     const std::unordered_set<PartitionID>& excluded) const {
-  if (partition_storage.size() < 2 || data_size_index.empty()) {
+  if (partition_storage.size() <= std::max<uint32_t>(2, max_partitions_ / 2)) {
     return std::nullopt;
   }
   uint64_t total = 0;
-  for (const auto& kv : partition_storage) total += kv.second.stats.data_size;
-  uint64_t avg = total / static_cast<uint64_t>(partition_storage.size());
-  if (avg <= 0) return std::nullopt;
+  uint64_t total_growth = 0;
+  for (const auto& kv : partition_storage) {
+    total += kv.second.stats.data_size;
+    total_growth += kv.second.MinHistoryDataSize();
+  }
+  uint64_t avg_size = total / static_cast<uint64_t>(partition_storage.size());
+  uint64_t avg_growth =
+      total_growth / static_cast<uint64_t>(partition_storage.size());
+  if (avg_size == 0) return std::nullopt;
 
-  // Scan from smallest data size upward; skip excluded candidates.
-  for (auto lo_it = data_size_index.begin();
-       lo_it != data_size_index.end(); ++lo_it) {
-    if (static_cast<double>(lo_it->first) >= avg * merge_growth_threshold_) {
-      // Remaining entries all above threshold.
+  // Build candidate list sorted by min(history) ascending.
+  std::vector<PartitionTableStorage::const_iterator> candidates;
+  candidates.reserve(partition_storage.size());
+  for (auto it = partition_storage.begin(); it != partition_storage.end();
+       ++it) {
+    candidates.push_back(it);
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](PartitionTableStorage::const_iterator a,
+               PartitionTableStorage::const_iterator b) {
+              return a->second.MinHistoryDataSize() <
+                     b->second.MinHistoryDataSize();
+            });
+
+  for (auto cand_it : candidates) {
+    const auto& cand_info = cand_it->second;
+    PartitionID candidate_pid = cand_info.partition_id;
+    if (excluded.count(candidate_pid) != 0) continue;
+    if (cand_info.merge_cooldown != 0) continue;
+    uint64_t growth = cand_info.MinHistoryDataSize();
+    if (avg_growth > 0 &&
+        static_cast<double>(growth) >= avg_growth * merge_growth_threshold_) {
+      // sorted ascending by growth; remaining are all above threshold.
       break;
     }
-    auto merge_pm_it = lo_it->second;
-    PartitionID candidate_pid = merge_pm_it->second.partition_id;
-    if (excluded.count(candidate_pid) != 0) continue;
+    if (static_cast<double>(cand_info.stats.data_size) >=
+        avg_size * merge_growth_threshold_) {
+      continue;
+    }
 
     // Try right neighbor first.
-    auto next_it = std::next(merge_pm_it);
+    auto next_it = std::next(cand_it);
     if (next_it != partition_storage.end()) {
       PartitionID right_pid = next_it->second.partition_id;
-      if (excluded.count(right_pid) == 0) {
+      if (excluded.count(right_pid) == 0 &&
+          next_it->second.merge_cooldown == 0) {
         MergePlan plan;
         plan.left_pid = candidate_pid;
         plan.right_pid = right_pid;
@@ -384,17 +453,17 @@ std::optional<PartitionTable::MergePlan> PartitionTable::GetMergePlan(
       }
     }
     // Try left neighbor.
-    if (merge_pm_it != partition_storage.begin()) {
-      auto prev_it = std::prev(merge_pm_it);
+    if (cand_it != partition_storage.begin()) {
+      auto prev_it = std::prev(cand_it);
       PartitionID left_pid = prev_it->second.partition_id;
-      if (excluded.count(left_pid) == 0) {
+      if (excluded.count(left_pid) == 0 &&
+          prev_it->second.merge_cooldown == 0) {
         MergePlan plan;
         plan.left_pid = left_pid;
         plan.right_pid = candidate_pid;
         return plan;
       }
     }
-    // Both neighbors excluded; try next low-growth candidate.
   }
   return std::nullopt;
 }
@@ -432,21 +501,23 @@ void PartitionTable::Merge(PartitionID left_pid, PartitionID right_pid) {
 PartitionTable::CompactionType PartitionTable::NeedCompaction(
     const std::unordered_set<PartitionID>& excluded) const {
   // kRangeDelete has highest priority: GC tombstones first.
-  if (GetRangeDeletePlan(excluded).has_value()) {
+  if (enable_range_delete_compaction_ &&
+      GetRangeDeletePlan(excluded).has_value()) {
     return CompactionType::kRangeDelete;
   }
 
-  if (GetPartitionCompactionPlan(excluded).has_value()) {
+  if (enable_partition_compaction_ &&
+      GetPartitionCompactionPlan(excluded).has_value()) {
     return CompactionType::kPartition;
   }
 
   if (NumPartitions() < 2) {
     return CompactionType::kNone;
   }
-  if (GetSplitPlan(excluded).has_value()) {
+  if (enable_partition_split_ && GetSplitPlan(excluded).has_value()) {
     return CompactionType::kSplit;
   }
-  if (GetMergePlan(excluded).has_value()) {
+  if (enable_partition_merge_ && GetMergePlan(excluded).has_value()) {
     return CompactionType::kMerge;
   }
   return CompactionType::kNone;
@@ -507,20 +578,50 @@ std::shared_ptr<PartitionTable> PartitionTable::ApplyToNewTable(
     if (edit->type == PartitionTableEdits::Edit::Type::kSplit) {
       auto split = std::static_pointer_cast<PartitionTableEdits::Split>(edit);
       const auto& plan = split->plan;
-      new_pt->Split(plan.pid, split->new_boundary);
+      // Always set cooldowns on the source pid even if the actual split
+      // fails (empty boundary etc.), to avoid the same pid being re-picked
+      // immediately and entering a tight loop.
+      auto src_it = new_pt->FindByPid(plan.pid);
+      if (src_it != new_pt->partition_storage.end()) {
+        src_it->second.split_cooldown = new_pt->split_cooldown_;
+        src_it->second.merge_cooldown = new_pt->merge_cooldown_;
+      }
+      if (!split->new_boundary.empty()) {
+        new_pt->Split(plan.pid, plan.new_pid, split->new_boundary);
+        // Newly created partition (if any) inherits cooldowns so it's not
+        // immediately merged or re-split before its history fills up.
+        auto new_it = new_pt->partition_storage.find(split->new_boundary);
+        if (new_it != new_pt->partition_storage.end()) {
+          new_it->second.split_cooldown = new_pt->split_cooldown_;
+          new_it->second.merge_cooldown = new_pt->merge_cooldown_;
+        }
+      }
     } else if (edit->type == PartitionTableEdits::Edit::Type::kMerge) {
       auto merge = std::static_pointer_cast<PartitionTableEdits::Merge>(edit);
       const auto& plan = merge->plan;
       new_pt->Merge(plan.left_pid, plan.right_pid);
+      auto right_it = new_pt->FindByPid(plan.right_pid);
+      if (right_it != new_pt->partition_storage.end()) {
+        right_it->second.split_cooldown = new_pt->split_cooldown_;
+        right_it->second.merge_cooldown = new_pt->merge_cooldown_;
+      }
     } else if (edit->type == PartitionTableEdits::Edit::Type::kPartitionUpdate) {
       auto update =
           std::static_pointer_cast<PartitionTableEdits::PartitionUpdate>(edit);
       PartitionID pid = update->pid;
       // 此时可能已经Compaction了, pid可能不存在
-      auto partition = new_pt->GetPartition(pid);
-      if (partition != std::nullopt) {
-        PartitionStats new_stats = partition->stats;
+      auto id_it = new_pt->FindByPid(pid);
+      if (id_it != new_pt->partition_storage.end()) {
+        PartitionStats new_stats = id_it->second.stats;
         new_stats += update->stats;
+        // Push the per-flush incremental write size into history.
+        if (new_pt->stats_window_ > 0) {
+          auto& hist = id_it->second.history_data_size;
+          hist.push_back(update->stats.data_size);
+          while (hist.size() > new_pt->stats_window_) {
+            hist.pop_front();
+          }
+        }
         new_pt->UpdateStats(pid, new_stats);
       }
     } else if (edit->type ==
@@ -559,7 +660,11 @@ std::shared_ptr<PartitionTable> PartitionTable::ApplyToNewTable(
       }
     }
   }
-  // edites.clear();
+  // Decay all cooldowns once per apply event.
+  for (auto& kv : new_pt->partition_storage) {
+    if (kv.second.split_cooldown > 0) --kv.second.split_cooldown;
+    if (kv.second.merge_cooldown > 0) --kv.second.merge_cooldown;
+  }
   return new_pt;
 };
 

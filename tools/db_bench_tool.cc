@@ -576,6 +576,30 @@ DEFINE_uint32(delta_partition_file_num_compaction_trigger, 4,
               "Delta compaction: Trigger compaction when a partition has at least "
               "this many files.");
 
+DEFINE_uint32(delta_partition_stats_window, 4,
+              "Delta compaction: window size of per-partition flush "
+              "data_size history used for split / merge selection.");
+
+DEFINE_uint32(delta_partition_split_cooldown, 4,
+              "Delta compaction: cooldown (in PartitionTable apply events) "
+              "after a partition is picked for split.");
+
+DEFINE_uint32(delta_partition_merge_cooldown, 4,
+              "Delta compaction: cooldown (in PartitionTable apply events) "
+              "after a partition is picked for merge.");
+
+DEFINE_bool(delta_enable_partition_split, true,
+            "Delta compaction: enable partition split compactions.");
+
+DEFINE_bool(delta_enable_partition_merge, true,
+            "Delta compaction: enable partition merge compactions.");
+
+DEFINE_bool(delta_enable_partition_compaction, true,
+            "Delta compaction: enable intra-partition Universal compactions.");
+
+DEFINE_bool(delta_enable_range_delete_compaction, true,
+            "Delta compaction: enable range-delete GC compactions.");
+
 DEFINE_bool(delta_enable_read_optimization, true,
             "filter files by partition in L0 by lookup key");
 
@@ -4280,6 +4304,20 @@ class Benchmark {
           FLAGS_delta_partition_merge_growth_threshold;
       options.compaction_options_delta.partition_file_num_compaction_trigger =
           FLAGS_delta_partition_file_num_compaction_trigger;
+      options.compaction_options_delta.partition_stats_window =
+          FLAGS_delta_partition_stats_window;
+      options.compaction_options_delta.partition_split_cooldown =
+          FLAGS_delta_partition_split_cooldown;
+      options.compaction_options_delta.partition_merge_cooldown =
+          FLAGS_delta_partition_merge_cooldown;
+      options.compaction_options_delta.enable_partition_split =
+        FLAGS_delta_enable_partition_split;
+      options.compaction_options_delta.enable_partition_merge =
+        FLAGS_delta_enable_partition_merge;
+      options.compaction_options_delta.enable_partition_compaction =
+        FLAGS_delta_enable_partition_compaction;
+      options.compaction_options_delta.enable_range_delete_compaction =
+        FLAGS_delta_enable_range_delete_compaction;
       options.compaction_options_delta.enable_read_optimization =
           FLAGS_delta_enable_read_optimization;
       // Delta style requires num_levels=1 (L0 only)

@@ -1663,9 +1663,8 @@ Status CompactionJob::InstallCompactionResults(
     } else if (plan->type == PartitionTable::Plan::Type::kSplit) {
       auto split_plan =
           std::static_pointer_cast<PartitionTable::SplitPlan>(plan);
-      if (!boundaries_.empty()) {
+      assert(!boundaries_.empty());
         pt_editor->AddSplit(*split_plan, boundaries_.front());
-      }
     } else if (plan->type == PartitionTable::Plan::Type::kPartition) {
       auto partition_plan =
           std::static_pointer_cast<PartitionTable::PartitionCompactionPlan>(

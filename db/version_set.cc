@@ -1965,7 +1965,14 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
     const auto merge_threshold = delta_options.partition_merge_growth_threshold;
     const auto file_trigger = delta_options.partition_file_num_compaction_trigger;
     storage_info_.SetPartitionTable(std::make_shared<PartitionTable>(
-        max_partitions, split_threshold, merge_threshold, file_trigger));
+        max_partitions, split_threshold, merge_threshold, file_trigger,
+        delta_options.partition_stats_window,
+        delta_options.partition_split_cooldown,
+        delta_options.partition_merge_cooldown,
+        delta_options.enable_partition_split,
+        delta_options.enable_partition_merge,
+        delta_options.enable_partition_compaction,
+        delta_options.enable_range_delete_compaction));
   }
 }
 

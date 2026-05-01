@@ -29,7 +29,14 @@ std::shared_ptr<PartitionTable> NewEmptyPartitionTable(ColumnFamilyData* cfd) {
       delta_options.max_partitions,
       delta_options.partition_split_growth_threshold,
       delta_options.partition_merge_growth_threshold,
-      delta_options.partition_file_num_compaction_trigger);
+      delta_options.partition_file_num_compaction_trigger,
+      delta_options.partition_stats_window,
+      delta_options.partition_split_cooldown,
+      delta_options.partition_merge_cooldown,
+      delta_options.enable_partition_split,
+      delta_options.enable_partition_merge,
+      delta_options.enable_partition_compaction,
+      delta_options.enable_range_delete_compaction);
 }
 
 Status ApplyPartitionTableState(const VersionEdit& edit, ColumnFamilyData* cfd,
@@ -656,7 +663,14 @@ Status VersionEditHandler::ExtractInfoFromVersionEdit(ColumnFamilyData* cfd,
             delta_options.max_partitions,
             delta_options.partition_split_growth_threshold,
             delta_options.partition_merge_growth_threshold,
-            delta_options.partition_file_num_compaction_trigger);
+            delta_options.partition_file_num_compaction_trigger,
+            delta_options.partition_stats_window,
+            delta_options.partition_split_cooldown,
+            delta_options.partition_merge_cooldown,
+            delta_options.enable_partition_split,
+            delta_options.enable_partition_merge,
+            delta_options.enable_partition_compaction,
+            delta_options.enable_range_delete_compaction);
         return s;
       }
     }
