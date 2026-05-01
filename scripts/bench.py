@@ -115,6 +115,9 @@ class BenchConfig:
     max_bytes_for_level_base: int = 128 * 1024 * 1024
     max_background_jobs: int = 8
 
+    perf_level: int = 3
+    report_interval_seconds: int = 5
+
     @property
     def label(self) -> str:
         return f"{self.compaction_style.name}_n{self.num//1000000}M_t{self.threads}_{self.workload.label}_{self.delta.label}"
@@ -248,18 +251,19 @@ def summarize_suite_sizes(config_spaces: Sequence[type[ConfigSpace]]) -> Dict[st
 import logging
 
 logger = logging.getLogger(Path(__file__).stem)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger.setLevel(logging.DEBUG)
 # Add console handler
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-ch.setFormatter(formatter)
-# Add file handler
-fh = logging.FileHandler(LOG_FILE, mode='w')
-fh.setLevel(logging.DEBUG)
-fh.setFormatter(formatter)
-logger.addHandler(ch)
-logger.addHandler(fh)
+_ch = logging.StreamHandler()
+_ch.setLevel(logging.INFO)
+_ch.setFormatter(_formatter)
+logger.addHandler(_ch)
+
+def _setup_file_logging():
+    fh = logging.FileHandler(LOG_FILE, mode='w')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(_formatter)
+    logger.addHandler(fh)
 
 # %%
 
@@ -274,8 +278,6 @@ def build_cmd(cfg: BenchConfig, db_dir: Path, report_file: Path) -> List[str]:
     cmd += [
         "--statistics",
         "--histogram",
-        "--perf_level=2",
-        "--report_interval_seconds=5",
         f"--report_file={report_file}",
         f"--db={db_dir}",
     ]
@@ -319,7 +321,7 @@ def run_one(cfg: BenchConfig) -> Dict:
         unit="ops",
         unit_scale=True,
         dynamic_ncols=True,
-        leave=True,
+        leave=False,
     ) as pbar:
         best = -1
 
