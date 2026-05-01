@@ -4310,18 +4310,18 @@ class Benchmark {
           FLAGS_delta_partition_split_cooldown;
       options.compaction_options_delta.partition_merge_cooldown =
           FLAGS_delta_partition_merge_cooldown;
-        options.compaction_options_delta.enable_partition_split =
+      options.compaction_options_delta.enable_partition_split =
           FLAGS_delta_enable_partition_split;
-        options.compaction_options_delta.enable_partition_merge =
+      options.compaction_options_delta.enable_partition_merge =
           FLAGS_delta_enable_partition_merge;
-        options.compaction_options_delta.enable_partition_compaction =
+      options.compaction_options_delta.enable_partition_compaction =
           FLAGS_delta_enable_partition_compaction;
-        options.compaction_options_delta.enable_range_delete_compaction =
+      options.compaction_options_delta.enable_range_delete_compaction =
           FLAGS_delta_enable_range_delete_compaction;
       options.compaction_options_delta.enable_read_optimization =
           FLAGS_delta_enable_read_optimization;
       // Delta style requires num_levels=1 (L0 only)
-      options.num_levels = 1;
+      FLAGS_num_levels = 1;
     }
 #endif  // ROCKSDB_LITE
     options.prefix_extractor = prefix_extractor_;
