@@ -272,7 +272,10 @@ void CompactionJob::Prepare() {
     StopWatch sw(db_options_.clock, stats_, SUBCOMPACTION_SETUP_TIME);
     GenSubcompactionBoundaries();
   }
-  if (boundaries_.size() > 1) {
+  const bool is_delta_split =
+      c->GetCompactionPlan() != nullptr &&
+      c->GetCompactionPlan()->type == PartitionTable::Plan::Type::kSplit;
+  if ((!is_delta_split && boundaries_.size() > 1) || (is_delta_split && !boundaries_.empty())) {
     for (size_t i = 0; i <= boundaries_.size(); i++) {
       compact_->sub_compact_states.emplace_back(
           c, (i != 0) ? std::optional<Slice>(boundaries_[i - 1]) : std::nullopt,
@@ -574,7 +577,16 @@ void CompactionJob::GenSubcompactionBoundaries() {
           c->immutable_options()->compaction_style, base_level,
           c->immutable_options()->level_compaction_dynamic_level_bytes));
 
-  if (target_range_size >= total_size) {
+  const bool is_delta_split =
+      c->GetCompactionPlan() != nullptr &&
+      c->GetCompactionPlan()->type == PartitionTable::Plan::Type::kSplit;
+  if (is_delta_split) {
+    assert(num_planned_subcompactions == 2);
+    target_range_size =
+        std::max<uint64_t>(1, total_size / num_planned_subcompactions);
+  }
+
+  if (!is_delta_split && target_range_size >= total_size) {
     return;
   }
 
