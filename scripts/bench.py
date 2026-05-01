@@ -2,6 +2,8 @@
 # %%
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
+import threading
 import tyro
 from enum import Enum
 from itertools import product
@@ -16,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 import pandas as pd
+from tqdm import tqdm
+from tail import Tail
 
 # %%
 
@@ -24,7 +28,7 @@ try:
 except NameError:
     SCRIPT_DIR = Path(os.getcwd())
 PROJ_DIR = SCRIPT_DIR.resolve().parent
-print(f"Project dir: {PROJ_DIR}")
+print(f"Project dir: {PROJ_DIR}\n")
 os.chdir(PROJ_DIR)
 
 # %%
@@ -45,7 +49,6 @@ class WorkloadConfig:
     keyrange_dist_c: float = -100
     keyrange_dist_d: float = -3.45
     delta_bench_rowset_trigger_percent: int = 60
-    delta_bench_delta_merge_count: int = 10
 
     @property
     def label(self) -> str:
@@ -67,8 +70,10 @@ class DeltaConfig:
 
     delta_partition_split_growth_threshold: float = 1.5
     delta_partition_merge_growth_threshold: float = 0.5
-    # enable_range_delete_compaction: bool = True
-    # enable_dynamic_partition: bool = True
+    delta_enable_partition_split: bool = True
+    delta_enable_partition_merge: bool = True
+    delta_enable_partition_compaction: bool = True
+    delta_enable_range_delete_compaction: bool = True
 
     @property
     def label(self) -> str:
@@ -125,7 +130,7 @@ class BenchConfig:
 
 class ConfigSpace:
     compaction_style = [COMPACTION_STYLES.delta, COMPACTION_STYLES.leveled]
-    num = [1_000_000, 10_000_000, 100_000_000]
+    num = [1_000_000, 10_000_000, ]# 100_000_000]
     thread = [8]
 
     rws_ratio = [
@@ -141,23 +146,23 @@ class ConfigSpace:
 
 class DefaultConfig(ConfigSpace):
     compaction_style = [COMPACTION_STYLES.delta]
-    num = [100_000_000]
+    num = [10_000_000]
     threads = [8]
 
     rws_ratio = [
         (0.25, 0.50, 0.25),
     ]
 
-    key_dist_a = [1.0]
+    key_dist_a = [0.0]
     delta_bench_rowset_num = [8]
 
     delta_max_partitions = [16]
-    delta_partition_file_num_compaction_trigger = [4]
+    delta_partition_file_num_compaction_trigger = [3]
 
 # 对比 Delta和Leveled 在:
 class DeltaLeveledMainConfig(DefaultConfig):
     compaction_style = [COMPACTION_STYLES.delta, COMPACTION_STYLES.leveled]
-    num = [1_000_000, 10_000_000, 100_000_000]
+    num = [1_000_000, 10_000_000,]# 100_000_000]
 
     rws_ratio = [
         (0.10, 0.50, 0.40),
@@ -167,24 +172,18 @@ class DeltaLeveledMainConfig(DefaultConfig):
 
 # Delta对比均匀/热点
 class DeltaKeyDistributionConfig(DefaultConfig):
-    # num = [10_000_000]
-
     key_dist_a = [1.0, 0.0]
 
 # Delta对比delta_partition_file_num_compaction_trigger
 class DeltaCompactionTriggerConfig(DefaultConfig):
-    # num = [10_000_000]
-
     delta_partition_file_num_compaction_trigger = [2, 3, 4]
 
 # Delta对比delta_max_partitions
 class DeltaPartitionNumConfig(DefaultConfig):
-    # num = [10_000_000]
-
-    delta_max_partitions = [8, 16, 32, 64]
+    delta_max_partitions = [8, 16, 32]
 
 EXPERIMENT_SUITES = [
-    # DeltaLeveledMainConfig,
+    DeltaLeveledMainConfig,
     DeltaKeyDistributionConfig,
     DeltaCompactionTriggerConfig,
     DeltaPartitionNumConfig,
@@ -282,8 +281,10 @@ def build_cmd(cfg: BenchConfig, db_dir: Path, report_file: Path) -> List[str]:
     ]
     return cmd
 
+_OPS_PATTERN = re.compile(r'\.\.\..*finished (\d+) ops')
+
 def run_cmd(cmd: List[str], log_file: Path = None) -> subprocess.CompletedProcess:
-    logger.info(f"Running cmd:\n{' '.join(shlex.quote(c) for c in cmd)}")
+    logger.debug(f"cmd:\n{' '.join(shlex.quote(c) for c in cmd)}")
     with open(log_file, "w") if log_file else subprocess.DEVNULL as f:
         proc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
@@ -303,28 +304,60 @@ def run_one(cfg: BenchConfig) -> Dict:
     db_dir.mkdir(parents=True, exist_ok=True)
     report_file = suit_dir / "report.log"
     log_file = suit_dir / "db_bench.log"
+    db_log_file = db_dir / "LOG"
 
     cmd = build_cmd(cfg, db_dir, report_file)
 
-    logger.debug(f"Running tag={tag}, cmd=\n{' \\\n\t'.join(shlex.quote(c) for c in cmd)}")
+    logger.info(f"Running tag = {tag}, \ndb = {db_dir}, \ncmd =\n{' \\\n\t'.join(shlex.quote(c) for c in cmd)}")
+
+    log_file.touch()  # Tail requires file to exist before init
 
     t0 = time.perf_counter()
-    _ = run_cmd(cmd, log_file)
+    with tqdm(
+        total=cfg.num,
+        desc=tag,
+        unit="ops",
+        unit_scale=True,
+        dynamic_ncols=True,
+        leave=True,
+    ) as pbar:
+        best = -1
+
+        def _on_line(line: str) -> None:
+            nonlocal best
+            m = _OPS_PATTERN.search(line)
+            if not m:
+                return
+            n = int(m.group(1))
+            if n > best:
+                pbar.update(n - best)   # 只更新增量
+                best = n
+
+        t_tail = Tail(str(log_file))
+        t_tail.register_callback(lambda line: _on_line(line))
+        tail_thread = threading.Thread(target=lambda: t_tail.follow(s=0.05), daemon=True)
+        tail_thread.start()
+        _ = run_cmd(cmd, log_file)
+        tail_thread.join(timeout=1)
     elapsed = time.perf_counter() - t0
 
-    flat = asdict(cfg)
-    flat.update(flat.pop("workload"))
-    flat.update(flat.pop("delta"))
+    # rm *.sst *.log in db_dir
+    for sst in db_dir.glob("*.sst"):
+        sst.unlink()
+    for log in db_dir.glob("*.log"):
+        log.unlink()
+
     result = {
         "tag": tag,
         "elapsed_sec": elapsed,
-        **flat,
+        "config": cfg.dict(),
     }
+    logger.info(f"Finished tag={tag}, elapsed_sec={elapsed:.2f}")
     return result
 
 def run_sweep(configs: List[BenchConfig], dry_run: bool = False) -> List[Dict]:
     all_tasks = configs
-    print(f"\n{len(all_tasks)} tasks\n")
+    logger.info(f"{len(all_tasks)} tasks")
     results = []
 
     if dry_run:
