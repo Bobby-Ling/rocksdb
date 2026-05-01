@@ -3885,10 +3885,10 @@ void DBLiveFilesMetadataDumperCommand::DoCommand() {
           std::cout << filename
                     << "  num=" << sst_metadata.file_number
                     << "  size=" << sst_metadata.size
-                    << "  seqno=[" << sst_metadata.smallest_seqno
-                    << "," << sst_metadata.largest_seqno << "]"
-                    << "  smallest='" << sst_metadata.smallestkey << "'"
-                    << "  largest='" << sst_metadata.largestkey << "'"
+                    // << "  seqno=[" << sst_metadata.smallest_seqno
+                    // << "," << sst_metadata.largest_seqno << "]"
+                    // << "  smallest='" << sst_metadata.smallestkey << "'"
+                    // << "  largest='" << sst_metadata.largestkey << "'"
                     << "  partition_id=" << sst_metadata.partition_id
                     << std::endl;
         }  // End of for-loop over sst files
