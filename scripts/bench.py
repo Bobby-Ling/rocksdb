@@ -49,6 +49,7 @@ class WorkloadConfig:
     keyrange_dist_c: float = -100
     keyrange_dist_d: float = -3.45
     delta_bench_rowset_trigger_percent: int = 60
+    # delta_bench_delta_merge_count: int = 2**63 - 1
 
     @property
     def label(self) -> str:
@@ -75,6 +76,11 @@ class DeltaConfig:
     delta_enable_partition_compaction: bool = True
     delta_enable_range_delete_compaction: bool = True
 
+    # window / cooldown params (default values match C++ DEFINE_uint32 defaults)
+    delta_partition_stats_window: int = 4
+    delta_partition_split_cooldown: int = 4
+    delta_partition_merge_cooldown: int = 4
+
     @property
     def label(self) -> str:
         parts = [
@@ -89,6 +95,12 @@ class DeltaConfig:
             parts.append("nopart")
         if not self.delta_enable_range_delete_compaction:
             parts.append("norangegc")
+        if self.delta_partition_stats_window != 4:
+            parts.append(f"sw{self.delta_partition_stats_window}")
+        if self.delta_partition_split_cooldown != 4:
+            parts.append(f"sc{self.delta_partition_split_cooldown}")
+        if self.delta_partition_merge_cooldown != 4:
+            parts.append(f"mc{self.delta_partition_merge_cooldown}")
         return "_".join(parts)
 
 class COMPACTION_STYLES(Enum):
@@ -147,10 +159,19 @@ class ConfigSpace:
     delta_max_partitions = [8, 16, 32, 64] # max_partitions/2 is partition num in most cases
     delta_partition_file_num_compaction_trigger = [2, 3, 4]
 
+    # feature-switch / tuning params (singleton defaults; override in sensitivity suites)
+    delta_partition_stats_window = [4]
+    delta_partition_split_cooldown = [4]
+    delta_partition_merge_cooldown = [4]
+    delta_enable_partition_split = [True]
+    delta_enable_partition_merge = [True]
+    delta_enable_partition_compaction = [True]
+    delta_enable_range_delete_compaction = [True]
+
 class DefaultConfig(ConfigSpace):
     compaction_style = [COMPACTION_STYLES.delta]
     num = [10_000_000]
-    threads = [8]
+    thread = [8]
 
     rws_ratio = [
         (0.25, 0.50, 0.25),
@@ -165,12 +186,12 @@ class DefaultConfig(ConfigSpace):
 # 对比 Delta和Leveled 在:
 class DeltaLeveledMainConfig(DefaultConfig):
     compaction_style = [COMPACTION_STYLES.delta, COMPACTION_STYLES.leveled]
-    num = [1_000_000, 10_000_000,]# 100_000_000]
+    num = [1_000_000, 10_000_000, 50_000_000]
 
     rws_ratio = [
         (0.10, 0.50, 0.40),
         (0.40, 0.50, 0.10),
-        (0.33, 0.34, 0.33),
+        # (0.33, 0.34, 0.33),
     ]
 
 # Delta对比均匀/热点
@@ -185,11 +206,48 @@ class DeltaCompactionTriggerConfig(DefaultConfig):
 class DeltaPartitionNumConfig(DefaultConfig):
     delta_max_partitions = [8, 16, 32]
 
+# ---- 功能参数敏感性测试 suites ----
+
+# 测试 split/merge 历史窗口大小对分区决策的影响
+class DeltaStatsWindowConfig(DefaultConfig):
+    delta_partition_stats_window = [2, 4, 8, 16]
+
+# 测试 split cooldown 对 split 频率的影响
+class DeltaSplitCooldownConfig(DefaultConfig):
+    delta_partition_split_cooldown = [1, 2, 4, 8]
+
+# 测试 merge cooldown 对 merge 频率的影响
+class DeltaMergeCooldownConfig(DefaultConfig):
+    delta_partition_merge_cooldown = [1, 2, 4, 8]
+
+# 测试开关 partition split
+class DeltaPartitionSplitAblationConfig(DefaultConfig):
+    delta_enable_partition_split = [True, False]
+
+# 测试开关 partition merge
+class DeltaPartitionMergeAblationConfig(DefaultConfig):
+    delta_enable_partition_merge = [True, False]
+
+# 测试开关 intra-partition universal compaction
+class DeltaPartitionCompactionAblationConfig(DefaultConfig):
+    delta_enable_partition_compaction = [True, False]
+
+# 测试开关 range-delete GC compaction
+class DeltaRangeDeleteAblationConfig(DefaultConfig):
+    delta_enable_range_delete_compaction = [True, False]
+
 EXPERIMENT_SUITES = [
     DeltaLeveledMainConfig,
-    DeltaKeyDistributionConfig,
-    DeltaCompactionTriggerConfig,
-    DeltaPartitionNumConfig,
+    # DeltaKeyDistributionConfig,
+    # DeltaCompactionTriggerConfig,
+    # DeltaPartitionNumConfig,
+    DeltaStatsWindowConfig,
+    DeltaSplitCooldownConfig,
+    DeltaMergeCooldownConfig,
+    DeltaPartitionSplitAblationConfig,
+    DeltaPartitionMergeAblationConfig,
+    DeltaPartitionCompactionAblationConfig,
+    DeltaRangeDeleteAblationConfig,
 ]
 
 # %%
@@ -209,10 +267,23 @@ def generate_configs_for_suite(config_space: type[ConfigSpace]) -> List[BenchCon
     max_partitions = config_space.delta_max_partitions
     nums = config_space.num
     threads = config_space.thread
+    stats_windows = config_space.delta_partition_stats_window
+    split_cooldowns = config_space.delta_partition_split_cooldown
+    merge_cooldowns = config_space.delta_partition_merge_cooldown
+    enable_splits = config_space.delta_enable_partition_split
+    enable_merges = config_space.delta_enable_partition_merge
+    enable_part_compactions = config_space.delta_enable_partition_compaction
+    enable_range_deletes = config_space.delta_enable_range_delete_compaction
 
     configs = []
-    for compaction_style, key_dist_a, (get_r, put_r, seek_r), rs_num, trig, pt_num, n, t in product(
-        compaction_styles, key_dist_as, rws_ratios, rowset_nums, compaction_triggers, max_partitions, nums, threads
+    for (
+        compaction_style, key_dist_a, (get_r, put_r, seek_r), rs_num, trig, pt_num, n, t,
+        sw, sc, mc, en_split, en_merge, en_part, en_range
+    ) in product(
+        compaction_styles, key_dist_as, rws_ratios, rowset_nums, compaction_triggers,
+        max_partitions, nums, threads,
+        stats_windows, split_cooldowns, merge_cooldowns,
+        enable_splits, enable_merges, enable_part_compactions, enable_range_deletes,
     ):
         configs.append(BenchConfig(
             compaction_style=compaction_style,
@@ -228,6 +299,13 @@ def generate_configs_for_suite(config_space: type[ConfigSpace]) -> List[BenchCon
             delta=DeltaConfig(
                 delta_partition_file_num_compaction_trigger=trig,
                 delta_max_partitions=pt_num,
+                delta_partition_stats_window=sw,
+                delta_partition_split_cooldown=sc,
+                delta_partition_merge_cooldown=mc,
+                delta_enable_partition_split=en_split,
+                delta_enable_partition_merge=en_merge,
+                delta_enable_partition_compaction=en_part,
+                delta_enable_range_delete_compaction=en_range,
             ),
         ))
     return configs
@@ -374,6 +452,7 @@ def run_sweep(configs: List[BenchConfig], dry_run: bool = False) -> List[Dict]:
 
 # %%
 def main(dry_run: bool = False):
+    _setup_file_logging()
     logger.info(f"Starting benchmark sweep with DB_BENCH={DB_BENCH}")
     suite_sizes = summarize_suite_sizes(EXPERIMENT_SUITES)
     logger.info(f"Selected suites: {suite_sizes}")
