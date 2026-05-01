@@ -75,6 +75,8 @@
 #include "util/string_util.h"
 #include "util/user_comparator_wrapper.h"
 
+#include "nlohmann/json.hpp"
+
 // Generate the regular and coroutine versions of some methods by
 // including version_set_sync_and_async.h twice
 // Macros in the header will expand differently based on whether
@@ -3560,6 +3562,176 @@ std::string VersionStorageInfo::DeltaDebugString() const {
   return out;
 }
 
+std::string VersionStorageInfo::DeltaDebugSummary() const {
+  std::string out;
+  out.reserve(2048);
+
+  if (!partition_table_) {
+    out.append("  partition_table=null\n");
+    return out;
+  }
+
+  const auto partition_infos = partition_table_->GetPartitionInfos();
+  if (partition_infos.empty()) {
+    out.append("  partition_table=empty\n");
+    return out;
+  }
+
+  struct PartitionSummary {
+    PartitionID pid;
+    uint64_t total_size = 0;
+    std::vector<FileMetaData*> files;
+  };
+
+  std::vector<PartitionSummary> summaries;
+  summaries.reserve(partition_infos.size());
+
+  uint64_t max_partition_size = 0;
+  uint64_t max_file_size = 0;
+  uint64_t total_size = 0;
+
+  for (const auto& partition_info : partition_infos) {
+    PartitionSummary summary;
+    summary.pid = partition_info.partition_id;
+    summary.files = GetFilesInPartition(summary.pid);
+
+    for (const auto* f : summary.files) {
+      const uint64_t file_size = f->fd.GetFileSize();
+      summary.total_size += file_size;
+      max_file_size = std::max(max_file_size, file_size);
+    }
+
+    max_partition_size = std::max(max_partition_size, summary.total_size);
+    total_size += summary.total_size;
+    summaries.push_back(std::move(summary));
+  }
+
+  constexpr size_t kBarWidth = 32;
+  auto append_bar = [&](uint64_t value, uint64_t max_value) {
+    size_t filled = 0;
+    if (value > 0 && max_value > 0) {
+      filled =
+          static_cast<size_t>((value * kBarWidth + max_value - 1) / max_value);
+      filled = std::max<size_t>(filled, 1);
+      filled = std::min(filled, kBarWidth);
+    }
+
+    out.push_back('[');
+    out.append(filled, '|');
+    out.append(kBarWidth - filled, ' ');
+    out.push_back(']');
+  };
+
+  out.append("summary:");
+  out.append(" num_l0_files=");
+  out.append(std::to_string(files_[0].size()));
+  out.append(" total_size=");
+  out.append(std::to_string(total_size));
+  out.push_back('\n');
+
+  for (const auto& summary : summaries) {
+    out.push_back(' ');
+    append_bar(summary.total_size, max_partition_size);
+    out.append(" pid=");
+    out.append(std::to_string(summary.pid));
+    out.append(" files=");
+    out.append(std::to_string(summary.files.size()));
+    out.append(" size=");
+    out.append(std::to_string(summary.total_size));
+    out.push_back('\n');
+
+    for (const auto* f : summary.files) {
+      const uint64_t file_size = f->fd.GetFileSize();
+
+      out.append("     ");
+      append_bar(file_size, max_file_size);
+      out.append(" sst=");
+      out.append(std::to_string(f->fd.GetNumber()));
+      out.append(" size=");
+      out.append(std::to_string(file_size));
+      if (f->being_compacted) {
+        out.append(" compacted=1");
+      }
+      out.push_back('\n');
+    }
+  }
+
+  return out;
+}
+
+std::string VersionStorageInfo::DeltaDebugJson(int indent) const {
+  nlohmann::json root;
+
+  if (!partition_table_) {
+    root["partition_table"] = nullptr;
+    return root.dump(indent);
+  }
+
+  const auto partition_infos = partition_table_->GetPartitionInfos();
+  if (partition_infos.empty()) {
+    root["partition_table"] = "empty";
+    return root.dump(indent);
+  }
+
+  nlohmann::json view;
+  view["num_l0_files"] = files_[0].size();
+  // view["compaction_score"] = partition_table_->ComputeCompactionScore();
+  view["partitions"] = nlohmann::json::array();
+
+  for (const auto& partition_info : partition_infos) {
+    const PartitionID pid = partition_info.partition_id;
+    const auto files = GetFilesInPartition(pid);
+    const auto& stats = partition_info.stats;
+
+    nlohmann::json partition;
+    partition["pid"] = pid;
+    partition["stats"] = {
+        // {"file_count", stats.file_count},
+        // {"point_entries", stats.point_entries},
+        // {"total_entries", stats.total_entries},
+        {"point_deletions", stats.point_deletions},
+        {"range_deletions", stats.range_deletions},
+        // {"raw_key_size", stats.raw_key_size},
+        // {"raw_value_size", stats.raw_value_size},
+        {"data_size", stats.data_size},
+    };
+
+    // partition["left"] =
+    //     partition_info.left_bound.has_value()
+    //         ? nlohmann::json(Slice(partition_info.left_bound.value()).ToString(true))
+    //         : nlohmann::json(nullptr);
+
+    // partition["right"] =
+    //     partition_info.right_bound.has_value()
+    //         ? nlohmann::json(Slice(partition_info.right_bound.value()).ToString(true))
+    //         : nlohmann::json(nullptr);
+
+    partition["file_count"] = files.size();
+    partition["files"] = nlohmann::json::array();
+
+    for (const auto* f : files) {
+      nlohmann::json file;
+      file["sst"] = f->fd.GetNumber();
+      // file["pid"] = f->partition_id;
+      // file["seq"] = {
+      //     {"smallest", f->fd.smallest_seqno},
+      //     {"largest", f->fd.largest_seqno},
+      // };
+      file["entries"] = f->num_entries;
+      file["deletions"] = f->num_deletions;
+      file["size"] = f->fd.GetFileSize();
+      file["being_compacted"] = f->being_compacted;
+
+      partition["files"].push_back(std::move(file));
+    }
+
+    view["partitions"].push_back(std::move(partition));
+  }
+
+  root["delta_sst_partition_view"] = std::move(view);
+  return root.dump(indent);
+}
+
 void VersionStorageInfo::SetFinalized() {
   finalized_ = true;
 
@@ -4911,7 +5083,8 @@ Status VersionSet::ProcessManifestWrites(
         e->SetPartitionTableSnapshot(applied_pt);
       }
       versions[i]->storage_info()->SetPartitionTable(std::move(applied_pt));
-      ROCKS_LOG_INFO(db_options_->info_log, "%s", vstorage_info->DeltaDebugString().c_str());
+      ROCKS_LOG_INFO(db_options_->info_log, "%s", vstorage_info->DeltaDebugSummary().c_str());
+      ROCKS_LOG_INFO(db_options_->info_log, "delta summary json: \n%s", vstorage_info->DeltaDebugJson().c_str());
 
     }
   }

@@ -1051,6 +1051,9 @@ add_subdirectory(third-party/yalantinglibs)
 # list(APPEND THIRDPARTY_LIBS yalantinglibs)
 set(COMMON_THIRDPARTY_LIBS yalantinglibs)
 
+add_subdirectory(third-party/nlohmann)
+list(APPEND COMMON_THIRDPARTY_LIBS nlohmann_json::nlohmann_json)
+
 set(ROCKSDB_STATIC_LIB rocksdb${ARTIFACT_SUFFIX})
 set(ROCKSDB_SHARED_LIB rocksdb-shared${ARTIFACT_SUFFIX})
 
@@ -1210,6 +1213,12 @@ if(NOT WIN32 OR ROCKSDB_INSTALL_ON_WINDOWS)
   endforeach()
 
   install(DIRECTORY "${PROJECT_SOURCE_DIR}/cmake/modules" COMPONENT devel DESTINATION ${package_config_destination})
+
+  install(
+    TARGETS nlohmann_json
+    EXPORT RocksDBTargets
+    COMPONENT devel
+  )
 
   install(
     TARGETS ${ROCKSDB_STATIC_LIB}

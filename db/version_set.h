@@ -535,6 +535,10 @@ class VersionStorageInfo {
   // Return delta-compaction-oriented per-SST summary grouped by partition.
   std::string DeltaDebugString() const;
 
+  std::string DeltaDebugSummary() const;
+
+  std::string DeltaDebugJson(int indent = -1) const;
+
   uint64_t GetAverageValueSize() const {
     if (accumulated_num_non_deletions_ == 0) {
       return 0;
