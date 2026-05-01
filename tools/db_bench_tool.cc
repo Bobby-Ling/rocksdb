@@ -587,7 +587,7 @@ DEFINE_int32(delta_bench_rowset_trigger_percent, 80,
              "Delta benchmark: Trigger a rowset range delete after this "
              "percentage of rowset writes has accumulated.");
 
-DEFINE_int64(delta_bench_delta_merge_count, 100,
+DEFINE_int64(delta_bench_delta_merge_count, std::numeric_limits<int64_t>::max(),
              "Delta benchmark: Stop after this many rowset range deletes.");
 
 DEFINE_int64(cache_size, 8 << 20,  // 8MB
@@ -2811,7 +2811,6 @@ class Benchmark {
     int64_t rowset_num = 0;
     int64_t rowset_size = 0;
     uint64_t rowset_trigger_writes = 0;
-    int64_t target_merge_count = 0;
     std::unique_ptr<std::atomic<uint64_t>[]> rowset_write_counts;
     std::atomic<int64_t> merges_done{0};
   };
@@ -2842,11 +2841,6 @@ class Benchmark {
               "100\n");
       ErrorExit();
     }
-    if (FLAGS_delta_bench_delta_merge_count <= 0) {
-      fprintf(stderr,
-              "deltabench requires --delta_bench_delta_merge_count > 0\n");
-      ErrorExit();
-    }
     if (FLAGS_num_multi_db > 0) {
       fprintf(stderr, "deltabench does not support --num_multi_db\n");
       ErrorExit();
@@ -2869,8 +2863,6 @@ class Benchmark {
                                   FLAGS_delta_bench_rowset_trigger_percent +
                               99) /
                                  100));
-    delta_bench_state_->target_merge_count =
-        FLAGS_delta_bench_delta_merge_count;
     delta_bench_state_->rowset_write_counts.reset(
         new std::atomic<uint64_t>[FLAGS_delta_bench_rowset_num]);
     for (int64_t i = 0; i < FLAGS_delta_bench_rowset_num; ++i) {
@@ -2878,12 +2870,6 @@ class Benchmark {
           0, std::memory_order_relaxed);
     }
     delta_bench_state_->merges_done.store(0, std::memory_order_relaxed);
-  }
-
-  bool DeltaBenchFinished() const {
-    return delta_bench_state_ != nullptr &&
-           delta_bench_state_->merges_done.load(std::memory_order_relaxed) >=
-               delta_bench_state_->target_merge_count;
   }
 
   inline bool CompressSlice(const CompressionInfo& compression_info,
@@ -7188,11 +7174,17 @@ class Benchmark {
     Slice end_key = AllocateKey(&end_key_guard);
 
     uint64_t local_merges = 0;
-    while (!DeltaBenchFinished()) {
+    while (true) {
+      {
+        MutexLock l(&thread->shared->mu);
+        if (thread->shared->num_done + 1 >= thread->shared->num_initialized) {
+          break;
+        }
+      }
       DB* db = SelectDB(thread);
       bool merged = false;
       for (int64_t rowset_id = 0;
-           rowset_id < delta_bench_state_->rowset_num && !DeltaBenchFinished();
+           rowset_id < delta_bench_state_->rowset_num;
            ++rowset_id) {
         uint64_t write_count =
             delta_bench_state_->rowset_write_counts[rowset_id].load(
